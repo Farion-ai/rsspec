@@ -1,0 +1,28 @@
+[advisories]
+version = 2
+# Deny crates with known security advisories
+ignore = []
+
+[licenses]
+version = 2
+# Allow these licenses for dependencies
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFL",
+]
+
+[bans]
+# Deny duplicate versions of the same crate
+multiple-versions = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

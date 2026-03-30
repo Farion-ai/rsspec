@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! # rsspec — A Ginkgo/RSpec-inspired BDD testing framework for Rust
 //!
 //! Write expressive, structured tests using a closure-based API with
@@ -241,6 +242,108 @@ pub(crate) fn check_fail_on_focus() {
             );
         }
     }
+}
+
+// ============================================================================
+// Setup value store — typed return values from before_each/before_all, accessed by it
+// ============================================================================
+
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
+
+thread_local! {
+    /// Per-test values from returning `before_each`. Cleared between tests.
+    static SETUP_STORE: RefCell<HashMap<TypeId, Box<dyn Any>>> = RefCell::new(HashMap::new());
+    /// Stack of per-scope value maps from returning `before_all`.
+    /// `push_scope_setup_layer()` adds a new layer on scope entry;
+    /// `pop_scope_setup_layer()` removes it on scope exit.
+    /// Lookup searches from top (innermost scope) to bottom (outermost scope),
+    /// so inner `before_all` values shadow outer ones for the same type.
+    /// Tests run single-threaded; these thread-locals are never shared across threads.
+    static SCOPE_SETUP_STACK: RefCell<Vec<HashMap<TypeId, Box<dyn Any>>>> = RefCell::new(Vec::new());
+}
+
+/// Store a per-test value. Called by returning `before_each` hooks.
+///
+/// If two `before_each` hooks in the same scope return the same type `T`,
+/// the later hook's value overwrites the earlier one (last-registered-wins).
+pub(crate) fn store_setup_value<T: 'static>(val: T) {
+    SETUP_STORE.with(|cell| {
+        cell.borrow_mut().insert(TypeId::of::<T>(), Box::new(val));
+    });
+}
+
+/// Push a new empty scope layer onto the stack.
+/// Called by the runner when entering a `Describe` scope before `before_all` runs.
+pub(crate) fn push_scope_setup_layer() {
+    SCOPE_SETUP_STACK.with(|cell| {
+        cell.borrow_mut().push(HashMap::new());
+    });
+}
+
+/// Store a per-scope value into the current (innermost) scope layer.
+/// Called by returning `before_all` hooks.
+pub(crate) fn store_scope_setup_value<T: 'static>(val: T) {
+    SCOPE_SETUP_STACK.with(|cell| {
+        let mut stack = cell.borrow_mut();
+        let top = stack
+            .last_mut()
+            .expect("rsspec: store_scope_setup_value called with no active scope — internal error");
+        top.insert(TypeId::of::<T>(), Box::new(val));
+    });
+}
+
+/// Borrow a setup value by type and pass it to `f`.
+///
+/// Lookup order:
+/// 1. Per-test store (`before_each` values) — checked first
+/// 2. Scope stack from innermost to outermost (`before_all` values)
+///
+/// Panics with a clear message if no value of type `T` is found.
+pub(crate) fn with_setup_value<T: 'static, R>(f: impl FnOnce(&T) -> R) -> R {
+    let tid = TypeId::of::<T>();
+
+    let in_test_store = SETUP_STORE.with(|cell| cell.borrow().contains_key(&tid));
+
+    if in_test_store {
+        SETUP_STORE.with(|cell| {
+            let store = cell.borrow();
+            let val = store
+                .get(&tid)
+                .expect("rsspec: TypeId present but value missing — internal invariant violated")
+                .downcast_ref::<T>()
+                .expect("rsspec: TypeId/value type mismatch — internal invariant violated");
+            f(val)
+        })
+    } else {
+        SCOPE_SETUP_STACK.with(|cell| {
+            let stack = cell.borrow();
+            for layer in stack.iter().rev() {
+                if let Some(boxed) = layer.get(&tid) {
+                    return f(boxed
+                        .downcast_ref::<T>()
+                        .expect("rsspec: TypeId/value type mismatch — internal invariant violated"));
+                }
+            }
+            panic!(
+                "rsspec: no value of type `{}` — add a returning before_each or before_all",
+                std::any::type_name::<T>()
+            )
+        })
+    }
+}
+
+/// Clear per-test values. Called by the runner between tests.
+pub(crate) fn clear_setup_values() {
+    SETUP_STORE.with(|cell| cell.borrow_mut().clear());
+}
+
+/// Pop the current (innermost) scope layer.
+/// Called by the runner when a `Describe` scope ends, after `after_all` has run.
+pub(crate) fn pop_scope_setup_layer() {
+    SCOPE_SETUP_STACK.with(|cell| {
+        cell.borrow_mut().pop();
+    });
 }
 
 // ============================================================================

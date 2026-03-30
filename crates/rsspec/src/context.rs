@@ -4,6 +4,41 @@ use crate::runner::{self, RunConfig, Suite, TestNode};
 use std::cell::RefCell;
 
 // ============================================================================
+// IntoTestBody — marker-type dispatch for it() accepting Fn() or Fn(&T)
+// ============================================================================
+
+/// Marker: test body takes no parameters.
+#[doc(hidden)]
+pub struct Plain(());
+/// Marker: test body receives a `&T` from a returning `before_each`.
+#[doc(hidden)]
+pub struct WithSetup<T>(std::marker::PhantomData<T>);
+
+/// Trait that converts a closure into a boxed `Fn()` test body.
+/// Uses marker types so `it()` can accept both `|| { ... }` and `|val: &T| { ... }`.
+///
+/// This trait is an implementation detail of rsspec's marker-type dispatch.
+/// It is not intended as a user extension point.
+#[doc(hidden)]
+pub trait IntoTestBody<Marker> {
+    fn into_test_fn(self) -> Box<dyn Fn()>;
+}
+
+impl<F: Fn() + 'static> IntoTestBody<Plain> for F {
+    fn into_test_fn(self) -> Box<dyn Fn()> {
+        Box::new(self)
+    }
+}
+
+impl<T: 'static, F: Fn(&T) + 'static> IntoTestBody<WithSetup<T>> for F {
+    fn into_test_fn(self) -> Box<dyn Fn()> {
+        Box::new(move || {
+            crate::with_setup_value::<T, _>(|val| self(val));
+        })
+    }
+}
+
+// ============================================================================
 // Thread-local suite builder
 // ============================================================================
 
@@ -122,7 +157,10 @@ impl SuiteBuilder {
             1,
             "rsspec: unbalanced group push/pop at finalization"
         );
-        self.stack.pop().unwrap().children
+        self.stack
+            .pop()
+            .expect("rsspec: root frame missing — internal error")
+            .children
     }
 }
 
@@ -217,6 +255,9 @@ impl Context {
 
     /// Define a test case. Returns an [`ItBuilder`] for optional decorators.
     ///
+    /// The body can be either `Fn()` or `Fn(&T)` (receives the value
+    /// returned by `before_each`).
+    ///
     /// ```rust,no_run
     /// # fn main() { rsspec::run(|ctx| {
     /// ctx.it("works", || { assert!(true); });
@@ -227,32 +268,32 @@ impl Context {
     ///     .timeout(5000);
     /// # }); }
     /// ```
-    pub fn it(&self, name: &str, body: impl Fn() + 'static) -> ItBuilder {
-        ItBuilder::new(name.to_string(), body, false, false)
+    pub fn it<M>(&self, name: &str, body: impl IntoTestBody<M> + 'static) -> ItBuilder {
+        ItBuilder::new(name.to_string(), body.into_test_fn(), false, false)
     }
 
     /// Focused variant of [`it`](Self::it). Only focused tests run; others are skipped.
-    pub fn fit(&self, name: &str, body: impl Fn() + 'static) -> ItBuilder {
-        ItBuilder::new(name.to_string(), body, true, false)
+    pub fn fit<M>(&self, name: &str, body: impl IntoTestBody<M> + 'static) -> ItBuilder {
+        ItBuilder::new(name.to_string(), body.into_test_fn(), true, false)
     }
 
     /// Pending variant of [`it`](Self::it). The body is registered but never executed.
-    pub fn xit(&self, name: &str, body: impl Fn() + 'static) -> ItBuilder {
-        ItBuilder::new(name.to_string(), body, false, true)
+    pub fn xit<M>(&self, name: &str, body: impl IntoTestBody<M> + 'static) -> ItBuilder {
+        ItBuilder::new(name.to_string(), body.into_test_fn(), false, true)
     }
 
     /// Alias for [`it`](Self::it).
-    pub fn specify(&self, name: &str, body: impl Fn() + 'static) -> ItBuilder {
+    pub fn specify<M>(&self, name: &str, body: impl IntoTestBody<M> + 'static) -> ItBuilder {
         self.it(name, body)
     }
 
     /// Alias for [`fit`](Self::fit).
-    pub fn fspecify(&self, name: &str, body: impl Fn() + 'static) -> ItBuilder {
+    pub fn fspecify<M>(&self, name: &str, body: impl IntoTestBody<M> + 'static) -> ItBuilder {
         self.fit(name, body)
     }
 
     /// Alias for [`xit`](Self::xit).
-    pub fn xspecify(&self, name: &str, body: impl Fn() + 'static) -> ItBuilder {
+    pub fn xspecify<M>(&self, name: &str, body: impl IntoTestBody<M> + 'static) -> ItBuilder {
         self.xit(name, body)
     }
 
@@ -260,8 +301,29 @@ impl Context {
 
     /// Register a hook that runs before every test in this scope and nested scopes.
     /// Multiple `before_each` hooks in the same scope run in registration order.
-    pub fn before_each(&self, hook: impl Fn() + 'static) {
-        with_builder(|b| b.add_before_each(Box::new(hook)));
+    ///
+    /// If the closure returns a value (`T ≠ ()`), it is stored and can be received
+    /// by `it` blocks via a `|val: &T|` parameter. Closures that return `()` are
+    /// treated as side-effect-only hooks (backward-compatible with the original API).
+    ///
+    /// ```rust,no_run
+    /// # fn main() { rsspec::run(|ctx| {
+    /// // Returning a fixture — received as &T by it blocks
+    /// ctx.before_each(|| -> String { "hello".to_string() });
+    /// ctx.it("receives the value", |s: &String| { assert_eq!(s, "hello"); });
+    ///
+    /// // Side-effect only — returns () silently, no fixture stored
+    /// ctx.before_each(|| { /* setup */ });
+    /// ctx.it("no fixture needed", || { assert!(true); });
+    /// # }); }
+    /// ```
+    pub fn before_each<T: 'static>(&self, hook: impl Fn() -> T + 'static) {
+        with_builder(|b| b.add_before_each(Box::new(move || {
+            let val = hook();
+            if std::any::TypeId::of::<T>() != std::any::TypeId::of::<()>() {
+                crate::store_setup_value(val);
+            }
+        })));
     }
 
     /// Register a hook that runs after every test in this scope and nested scopes,
@@ -272,8 +334,17 @@ impl Context {
 
     /// Register a hook that runs once before all tests in this describe scope.
     /// Not inherited by nested scopes. Skipped if all children are filtered out.
-    pub fn before_all(&self, hook: impl Fn() + 'static) {
-        with_builder(|b| b.add_before_all(Box::new(hook)));
+    ///
+    /// If the closure returns a value, it is stored and can be received by
+    /// `it` blocks via a `|val: &T|` parameter. The value persists across
+    /// all tests in the scope (not cleared between tests).
+    pub fn before_all<T: 'static>(&self, hook: impl Fn() -> T + 'static) {
+        with_builder(|b| b.add_before_all(Box::new(move || {
+            let val = hook();
+            if std::any::TypeId::of::<T>() != std::any::TypeId::of::<()>() {
+                crate::store_scope_setup_value(val);
+            }
+        })));
     }
 
     /// Register a hook that runs once after all tests in this describe scope.
@@ -431,6 +502,11 @@ impl Context {
 
     /// Async variant of [`before_each`](Context::before_each).
     /// Each invocation runs on a fresh single-threaded Tokio runtime.
+    ///
+    /// **Known limitation:** `async_before_each` cannot return a fixture value.
+    /// The `Future::Output` must be `()`. If you need async setup that passes a
+    /// value to `it` blocks, perform the setup synchronously and store the result
+    /// in a `static` or use `async_before_each` for side-effects only.
     pub fn async_before_each<F, Fut>(&self, hook: F)
     where
         F: Fn() -> Fut + 'static,
@@ -451,6 +527,9 @@ impl Context {
 
     /// Async variant of [`before_all`](Context::before_all).
     /// Runs on a fresh single-threaded Tokio runtime.
+    ///
+    /// **Known limitation:** `async_before_all` cannot return a fixture value.
+    /// See [`async_before_each`](Self::async_before_each) for details.
     pub fn async_before_all<F, Fut>(&self, hook: F)
     where
         F: Fn() -> Fut + 'static,
@@ -511,10 +590,10 @@ pub struct ItBuilder {
 }
 
 impl ItBuilder {
-    fn new(name: String, body: impl Fn() + 'static, focused: bool, pending: bool) -> Self {
+    fn new(name: String, body: Box<dyn Fn()>, focused: bool, pending: bool) -> Self {
         ItBuilder {
             name,
-            body: Some(Box::new(body)),
+            body: Some(body),
             focused,
             pending,
             labels: Vec::new(),

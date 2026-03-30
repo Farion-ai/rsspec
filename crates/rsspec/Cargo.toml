@@ -18,10 +18,23 @@ googletest = { version = "0.14", optional = true }
 tokio = { version = "1", features = ["rt"], optional = true }
 
 [[test]]
-name = "closure_api_test"
+name = "describe_test"
+harness = false
+
+[[test]]
+name = "hooks_test"
+harness = false
+
+[[test]]
+name = "decorators_test"
+harness = false
+
+[[test]]
+name = "utilities_test"
 harness = false
 
 [[test]]
 name = "async_test"
 harness = false
 required-features = ["tokio"]
+

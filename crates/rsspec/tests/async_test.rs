@@ -1,3 +1,7 @@
+// Placeholder test bodies use `assert!(true)` or simple arithmetic assertions
+// to demonstrate async hook and decorator wiring.
+#![allow(clippy::assertions_on_constants, clippy::eq_op)]
+
 use std::sync::atomic::{AtomicU32, Ordering};
 
 fn main() {

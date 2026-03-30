@@ -1,0 +1,10 @@
+# Allow .unwrap() and .expect() in test code
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+
+# Enforce function size limits. Functions that inherently handle multiple
+# variants of a complex lifecycle (e.g. run_describe_node, run_it_node) may
+# exceed these limits; annotate them with #[allow(clippy::too_many_lines)]
+# and a brief justification.
+too-many-lines-threshold = 60
+cognitive-complexity-threshold = 20

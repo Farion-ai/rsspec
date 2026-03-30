@@ -10,6 +10,7 @@
 //!     ✗ fails on overflow
 //! ```
 
+use std::borrow::Cow;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Instant;
 
@@ -144,16 +145,19 @@ impl TestNode {
 
 /// Extract a human-readable message from a panic payload.
 ///
+/// Returns a `Cow::Borrowed` when the payload is `&str` or `String`,
+/// avoiding an allocation in the common case.
+///
 /// Must be called with `&*e` (not `&e`) when `e: Box<dyn Any + Send>`,
 /// because `&Box<dyn Any>` coerces to a trait object for the Box itself
 /// rather than deref-ing through to the inner type.
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> Cow<'_, str> {
     if let Some(s) = payload.downcast_ref::<&str>() {
-        s.to_string()
+        Cow::Borrowed(s)
     } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
+        Cow::Borrowed(s.as_str())
     } else {
-        "unknown panic".to_string()
+        Cow::Borrowed("unknown panic")
     }
 }
 
@@ -161,7 +165,9 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 // Hook chain — accumulates hooks from ancestor Describe nodes
 // ============================================================================
 
-#[derive(Default, Clone)]
+/// Accumulated hooks from ancestor Describe nodes, grown with push/pop
+/// as the runner descends into nested scopes. Avoids O(depth²) cloning.
+#[derive(Default)]
 struct HookChain<'a> {
     before_each: Vec<&'a dyn Fn()>,
     after_each: Vec<&'a dyn Fn()>,
@@ -170,7 +176,17 @@ struct HookChain<'a> {
 }
 
 impl<'a> HookChain<'a> {
-    fn with_describe(&self, node: &'a TestNode) -> HookChain<'a> {
+    /// Push the hooks and labels from `node` onto the chain.
+    ///
+    /// Returns the lengths before pushing so that [`pop_describe`] can
+    /// restore the chain to its previous state.
+    fn push_describe(&mut self, node: &'a TestNode) -> [usize; 4] {
+        let saved = [
+            self.before_each.len(),
+            self.after_each.len(),
+            self.just_before_each.len(),
+            self.labels.len(),
+        ];
         if let TestNode::Describe {
             before_each,
             after_each,
@@ -179,23 +195,21 @@ impl<'a> HookChain<'a> {
             ..
         } = node
         {
-            let mut chain = self.clone();
-            for hook in before_each {
-                chain.before_each.push(hook.as_ref());
-            }
-            for hook in after_each {
-                chain.after_each.push(hook.as_ref());
-            }
-            for hook in just_before_each {
-                chain.just_before_each.push(hook.as_ref());
-            }
-            for label in labels {
-                chain.labels.push(label.as_str());
-            }
-            chain
-        } else {
-            self.clone()
+            self.before_each.extend(before_each.iter().map(Box::as_ref));
+            self.after_each.extend(after_each.iter().map(Box::as_ref));
+            self.just_before_each
+                .extend(just_before_each.iter().map(Box::as_ref));
+            self.labels.extend(labels.iter().map(String::as_str));
         }
+        saved
+    }
+
+    /// Restore the chain to the state captured by a prior [`push_describe`] call.
+    fn pop_describe(&mut self, saved: [usize; 4]) {
+        self.before_each.truncate(saved[0]);
+        self.after_each.truncate(saved[1]);
+        self.just_before_each.truncate(saved[2]);
+        self.labels.truncate(saved[3]);
     }
 }
 
@@ -203,11 +217,19 @@ impl<'a> HookChain<'a> {
 // ANSI color helpers
 // ============================================================================
 
+/// Returns whether colored output should be used.
+///
+/// Result is cached in a `OnceLock` so the env-var and isatty checks
+/// run at most once per process.
 fn use_color() -> bool {
-    if std::env::var("NO_COLOR").is_ok() {
-        return false;
-    }
-    std::io::IsTerminal::is_terminal(&std::io::stdout())
+    use std::sync::OnceLock;
+    static COLOR: OnceLock<bool> = OnceLock::new();
+    *COLOR.get_or_init(|| {
+        if std::env::var("NO_COLOR").is_ok() {
+            return false;
+        }
+        std::io::IsTerminal::is_terminal(&std::io::stdout())
+    })
 }
 
 fn green(s: &str) -> String {
@@ -293,7 +315,8 @@ const LIBTEST_ONLY_ARGS: &[&str] = &[
 /// Returns `Some(arg)` with the first offending arg if detected, `None` otherwise.
 pub(crate) fn detect_libtest_args(args: &[String]) -> Option<String> {
     for arg in args {
-        let arg_name = arg.split('=').next().unwrap_or(arg);
+        // split_once is infallible here — the fallback branch is unreachable
+        let arg_name = arg.split_once('=').map_or(arg.as_str(), |(name, _)| name);
         if LIBTEST_ONLY_ARGS.contains(&arg_name) {
             return Some(arg.clone());
         }
@@ -356,13 +379,15 @@ fn run_tree(nodes: &[TestNode], config: &RunConfig) -> RunResult {
     let start = Instant::now();
 
     if config.list {
-        list_tree(nodes, &[], config);
+        let mut path = Vec::new();
+        list_tree(nodes, &mut path, config);
         return result;
     }
 
     println!();
-    let hooks = HookChain::default();
-    run_nodes(nodes, 0, &[], &hooks, focus_mode, false, config, &mut result);
+    let mut hooks = HookChain::default();
+    let mut path = Vec::new();
+    run_nodes(nodes, 0, &mut path, &mut hooks, focus_mode, false, config, &mut result);
     print_summary(&result, start.elapsed());
 
     result
@@ -375,8 +400,9 @@ pub(crate) fn run_suites(suites: &[Suite], config: &RunConfig) -> RunResult {
     let start = Instant::now();
 
     if config.list {
+        let mut path = Vec::new();
         for suite in suites {
-            list_tree(&suite.nodes, &[], config);
+            list_tree(&suite.nodes, &mut path, config);
         }
         return result;
     }
@@ -389,12 +415,13 @@ pub(crate) fn run_suites(suites: &[Suite], config: &RunConfig) -> RunResult {
             println!();
         }
 
-        let hooks = HookChain::default();
+        let mut hooks = HookChain::default();
+        let mut path = Vec::new();
         run_nodes(
             &suite.nodes,
             0,
-            &[],
-            &hooks,
+            &mut path,
+            &mut hooks,
             focus_mode,
             false,
             config,
@@ -415,11 +442,11 @@ pub(crate) fn run_suites(suites: &[Suite], config: &RunConfig) -> RunResult {
 /// focus mode, label filters, path filters, and pending status.
 ///
 /// Used to skip `before_all`/`after_all` when all children are filtered out.
-#[allow(clippy::too_many_arguments)]
-fn has_runnable_tests(
-    nodes: &[TestNode],
-    path: &[String],
-    hooks: &HookChain,
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn has_runnable_tests<'a>(
+    nodes: &'a [TestNode],
+    path: &mut Vec<String>,
+    hooks: &mut HookChain<'a>,
     focus_mode: bool,
     force_focused: bool,
     config: &RunConfig,
@@ -436,18 +463,20 @@ fn has_runnable_tests(
                 if *pending {
                     continue;
                 }
-                let mut child_path = path.to_vec();
-                child_path.push(name.clone());
-                let child_hooks = hooks.with_describe(node);
                 let child_force_focused = force_focused || *focused;
-                if has_runnable_tests(
+                path.push(name.clone());
+                let saved = hooks.push_describe(node);
+                let has_any = has_runnable_tests(
                     children,
-                    &child_path,
-                    &child_hooks,
+                    path,
+                    hooks,
                     focus_mode,
                     child_force_focused,
                     config,
-                ) {
+                );
+                hooks.pop_describe(saved);
+                path.pop();
+                if has_any {
                     return true;
                 }
             }
@@ -461,11 +490,9 @@ fn has_runnable_tests(
                 if *pending {
                     continue;
                 }
-                let full_path = {
-                    let mut p = path.to_vec();
-                    p.push(name.clone());
-                    p.join(" > ")
-                };
+                path.push(name.clone());
+                let full_path = path.join(" > ");
+                path.pop();
                 if let Some(ref f) = config.filter {
                     if !full_path.to_lowercase().contains(&f.to_lowercase()) {
                         continue;
@@ -486,14 +513,10 @@ fn has_runnable_tests(
                 }
                 return true;
             }
-            TestNode::Ordered {
-                name, labels, ..
-            } => {
-                let full_path = {
-                    let mut p = path.to_vec();
-                    p.push(name.clone());
-                    p.join(" > ")
-                };
+            TestNode::Ordered { name, labels, .. } => {
+                path.push(name.clone());
+                let full_path = path.join(" > ");
+                path.pop();
                 if let Some(ref f) = config.filter {
                     if !full_path.to_lowercase().contains(&f.to_lowercase()) {
                         continue;
@@ -519,11 +542,11 @@ fn has_runnable_tests(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_nodes(
-    nodes: &[TestNode],
+fn run_nodes<'a>(
+    nodes: &'a [TestNode],
     depth: usize,
-    path: &[String],
-    hooks: &HookChain,
+    path: &mut Vec<String>,
+    hooks: &mut HookChain<'a>,
     focus_mode: bool,
     force_focused: bool,
     config: &RunConfig,
@@ -534,345 +557,430 @@ fn run_nodes(
     }
 }
 
+/// Dispatch a single test node to the appropriate handler.
 #[allow(clippy::too_many_arguments)]
-fn run_node(
-    node: &TestNode,
+fn run_node<'a>(
+    node: &'a TestNode,
     depth: usize,
-    path: &[String],
-    hooks: &HookChain,
+    path: &mut Vec<String>,
+    hooks: &mut HookChain<'a>,
     focus_mode: bool,
     force_focused: bool,
     config: &RunConfig,
     result: &mut RunResult,
 ) {
     match node {
-        TestNode::Describe {
-            name,
-            focused,
-            pending,
-            children,
-            before_all,
-            after_all,
-            ..
-        } => {
-            let indent = "  ".repeat(depth);
-            println!("{indent}{}", bold(name));
-
-            let mut child_path = path.to_vec();
-            child_path.push(name.clone());
-
-            // If this describe is pending, mark all children as pending
-            if *pending {
-                run_nodes_pending(children, depth + 1, result);
-                return;
-            }
-
-            let child_hooks = hooks.with_describe(node);
-            let child_force_focused = force_focused || *focused;
-
-            // Skip before_all/after_all when no children will actually run
-            // (e.g. all filtered by labels or focus mode). This avoids running
-            // expensive setup for nothing.
-            let any_runnable = has_runnable_tests(
-                children,
-                &child_path,
-                &child_hooks,
-                focus_mode,
-                child_force_focused,
-                config,
-            );
-            let has_hooks = !before_all.is_empty() || !after_all.is_empty();
-
-            if !any_runnable && has_hooks {
-                // Still recurse children so pending/skipped counts are correct,
-                // but skip the before_all/after_all hooks.
-                run_nodes(
-                    children,
-                    depth + 1,
-                    &child_path,
-                    &child_hooks,
-                    focus_mode,
-                    child_force_focused,
-                    config,
-                    result,
-                );
-                return;
-            }
-
-            // Run before_all once at scope entry.
-            // If it panics, skip children but still run after_all.
-            let before_all_ok = catch_unwind(AssertUnwindSafe(|| {
-                for hook in before_all {
-                    hook();
-                }
-            }));
-
-            if let Err(e) = &before_all_ok {
-                let msg = panic_message(&**e);
-                let full_path = child_path.join(" > ");
-                println!("{indent}  {} before_all failed: {}", red("✗"), red(&msg));
-                result.failed += 1;
-                result.failures.push(format!("{full_path} (before_all): {msg}"));
-            } else {
-                run_nodes(
-                    children,
-                    depth + 1,
-                    &child_path,
-                    &child_hooks,
-                    focus_mode,
-                    child_force_focused,
-                    config,
-                    result,
-                );
-            }
-
-            // Run after_all once at scope exit — even if before_all failed
-            if let Err(e) = catch_unwind(AssertUnwindSafe(|| {
-                for hook in after_all {
-                    hook();
-                }
-            })) {
-                let msg = panic_message(&*e);
-                let full_path = child_path.join(" > ");
-                println!("{indent}  {} after_all failed: {}", red("✗"), red(&msg));
-                result.failed += 1;
-                result.failures.push(format!("{full_path} (after_all): {msg}"));
-            }
+        TestNode::Describe { .. } => {
+            run_describe_node(node, depth, path, hooks, focus_mode, force_focused, config, result);
         }
-        TestNode::It {
-            name,
-            focused,
-            pending,
-            labels,
-            retries,
-            timeout_ms,
-            must_pass_repeatedly,
-            test_fn,
-        } => {
-            let indent = "  ".repeat(depth);
-            let full_path = {
-                let mut p = path.to_vec();
-                p.push(name.clone());
-                p.join(" > ")
-            };
-
-            // Filter check
-            if let Some(ref f) = config.filter {
-                if !full_path.to_lowercase().contains(&f.to_lowercase()) {
-                    return;
-                }
-            }
-
-            // Pending
-            if *pending {
-                println!("{indent}{} {}", yellow("-"), dim(name));
-                result.pending += 1;
-                return;
-            }
-
-            // Focus mode: skip non-focused
-            let effectively_focused = *focused || force_focused;
-            if focus_mode && !effectively_focused && !config.include_ignored {
-                result.skipped += 1;
-                return;
-            }
-
-            // Fail-on-focus CI check
-            if effectively_focused && focus_mode {
-                crate::check_fail_on_focus();
-            }
-
-            // Label check (merge accumulated + own)
-            let all_labels: Vec<&str> = hooks
-                .labels
-                .iter()
-                .copied()
-                .chain(labels.iter().map(|s| s.as_str()))
-                .collect();
-            if !crate::check_labels(&all_labels) {
-                return;
-            }
-
-            // Execute the test
-            let start = Instant::now();
-
-            let test_body = || {
-                // Run before_each + just_before_each + test body, catching any panic
-                // so that after_each and cleanups are guaranteed to run.
-                let body_result = catch_unwind(AssertUnwindSafe(|| {
-                    for hook in &hooks.before_each {
-                        hook();
-                    }
-                    for hook in &hooks.just_before_each {
-                        hook();
-                    }
-                    test_fn();
-                }));
-
-                // after_each (innermost first) — each individually protected
-                let mut after_each_panic = None;
-                for hook in hooks.after_each.iter().rev() {
-                    if let Err(e) = catch_unwind(AssertUnwindSafe(hook)) {
-                        eprintln!("  warning: after_each hook panicked");
-                        if after_each_panic.is_none() {
-                            after_each_panic = Some(e);
-                        }
-                    }
-                }
-
-                // Deferred cleanups
-                crate::run_deferred_cleanups();
-
-                // Propagate the first failure: body takes priority over after_each
-                if let Err(e) = body_result {
-                    std::panic::resume_unwind(e);
-                }
-                if let Some(e) = after_each_panic {
-                    std::panic::resume_unwind(e);
-                }
-            };
-
-            // Apply decorators compositionally so combinations behave as expected:
-            // retries -> must_pass_repeatedly -> timeout (outermost)
-            let with_retries = || {
-                if let Some(n) = *retries {
-                    crate::with_retries(n, test_body);
-                } else {
-                    test_body();
-                }
-            };
-
-            let with_must_pass_repeatedly = || {
-                if let Some(n) = *must_pass_repeatedly {
-                    crate::must_pass_repeatedly(n, with_retries);
-                } else {
-                    with_retries();
-                }
-            };
-
-            let outcome = if let Some(ms) = *timeout_ms {
-                run_with_timeout(ms, &with_must_pass_repeatedly)
-            } else {
-                catch_unwind(AssertUnwindSafe(with_must_pass_repeatedly))
-            };
-
-            // Check if the test called skip!() — report as skipped, not passed
-            if outcome.is_ok() {
-                if let Some(reason) = crate::take_skip_reason() {
-                    println!("{indent}{} {} {}", yellow("-"), dim(name), dim(&format!("({reason})")));
-                    result.skipped += 1;
-                } else {
-                    report_outcome(&indent, name, &full_path, outcome, start, result);
-                }
-            } else {
-                // Clear any skip flag set before the panic
-                let _ = crate::take_skip_reason();
-                report_outcome(&indent, name, &full_path, outcome, start, result);
-            }
+        TestNode::It { .. } => {
+            run_it_node(node, depth, path, hooks, focus_mode, force_focused, config, result);
         }
-        TestNode::Ordered {
-            name,
-            labels,
-            continue_on_failure,
-            steps,
-        } => {
-            let indent = "  ".repeat(depth);
-            let full_path = {
-                let mut p = path.to_vec();
-                p.push(name.clone());
-                p.join(" > ")
-            };
-
-            // Filter check
-            if let Some(ref f) = config.filter {
-                if !full_path.to_lowercase().contains(&f.to_lowercase()) {
-                    return;
-                }
-            }
-
-            // Focus mode: skip non-focused ordered tests unless include_ignored is set.
-            if focus_mode && !force_focused && !config.include_ignored {
-                result.skipped += 1;
-                return;
-            }
-
-            // Fail-on-focus CI check for ordered tests inside focused containers.
-            if force_focused && focus_mode {
-                crate::check_fail_on_focus();
-            }
-
-            // Label check
-            let all_labels: Vec<&str> = hooks
-                .labels
-                .iter()
-                .copied()
-                .chain(labels.iter().map(|s| s.as_str()))
-                .collect();
-            if !crate::check_labels(&all_labels) {
-                return;
-            }
-
-            let start = Instant::now();
-
-            let outcome = catch_unwind(AssertUnwindSafe(|| {
-                // Run before_each + just_before_each + steps, catching any panic
-                // so that after_each and cleanups are guaranteed to run.
-                let body_result = catch_unwind(AssertUnwindSafe(|| {
-                    for hook in &hooks.before_each {
-                        hook();
-                    }
-                    for hook in &hooks.just_before_each {
-                        hook();
-                    }
-
-                    let mut failures: Vec<Box<dyn std::any::Any + Send>> = Vec::new();
-                    let total = steps.len();
-
-                    for (i, step) in steps.iter().enumerate() {
-                        eprintln!("  [{}/{}] {}", i + 1, total, step.name);
-                        if *continue_on_failure {
-                            if let Err(e) = catch_unwind(AssertUnwindSafe(|| (step.body)())) {
-                                failures.push(e);
-                            }
-                        } else {
-                            (step.body)();
-                        }
-                    }
-
-                    if !failures.is_empty() {
-                        panic!(
-                            "{} of {} ordered steps failed",
-                            failures.len(),
-                            steps.len()
-                        );
-                    }
-                }));
-
-                // after_each (innermost first) — each individually protected
-                let mut after_each_panic = None;
-                for hook in hooks.after_each.iter().rev() {
-                    if let Err(e) = catch_unwind(AssertUnwindSafe(hook)) {
-                        eprintln!("  warning: after_each hook panicked");
-                        if after_each_panic.is_none() {
-                            after_each_panic = Some(e);
-                        }
-                    }
-                }
-
-                crate::run_deferred_cleanups();
-
-                // Propagate the first failure: body takes priority over after_each
-                if let Err(e) = body_result {
-                    std::panic::resume_unwind(e);
-                }
-                if let Some(e) = after_each_panic {
-                    std::panic::resume_unwind(e);
-                }
-            }));
-
-            report_outcome(&indent, name, &full_path, outcome, start, result);
+        TestNode::Ordered { .. } => {
+            run_ordered_node(node, depth, path, hooks, focus_mode, force_focused, config, result);
         }
     }
+}
+
+/// Run a Describe node: print its name, run `before_all`/`after_all`, recurse.
+///
+/// Manages the scope-setup stack push/pop and hook-chain push/pop so that
+/// `before_all` values and inherited hooks are correctly scoped and restored.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn run_describe_node<'a>(
+    node: &'a TestNode,
+    depth: usize,
+    path: &mut Vec<String>,
+    hooks: &mut HookChain<'a>,
+    focus_mode: bool,
+    force_focused: bool,
+    config: &RunConfig,
+    result: &mut RunResult,
+) {
+    let TestNode::Describe {
+        name,
+        focused,
+        pending,
+        children,
+        before_all,
+        after_all,
+        ..
+    } = node
+    else {
+        unreachable!()
+    };
+
+    let indent = "  ".repeat(depth);
+    println!("{indent}{}", bold(name));
+
+    // If this describe is pending, mark all children as pending
+    if *pending {
+        run_nodes_pending(children, depth + 1, result);
+        return;
+    }
+
+    let child_force_focused = force_focused || *focused;
+
+    // Push path segment and this node's hooks before checking runnability
+    // so that has_runnable_tests sees the full accumulated context.
+    path.push(name.clone());
+    let saved_hooks = hooks.push_describe(node);
+
+    let any_runnable =
+        has_runnable_tests(children, path, hooks, focus_mode, child_force_focused, config);
+    let has_hooks = !before_all.is_empty() || !after_all.is_empty();
+
+    if !any_runnable && has_hooks {
+        // Still recurse children so pending/skipped counts are correct,
+        // but skip the before_all/after_all hooks.
+        // Push a scope layer for symmetry with the normal path (B1 fix).
+        crate::push_scope_setup_layer();
+        run_nodes(
+            children,
+            depth + 1,
+            path,
+            hooks,
+            focus_mode,
+            child_force_focused,
+            config,
+            result,
+        );
+        crate::pop_scope_setup_layer();
+        hooks.pop_describe(saved_hooks);
+        path.pop();
+        return;
+    }
+
+    // Push a new scope layer before before_all runs so that values stored by
+    // returning before_all hooks are scoped to this describe block and do not
+    // clobber outer-scope values when this block ends.
+    crate::push_scope_setup_layer();
+
+    // Run before_all once at scope entry.
+    // If it panics, skip children but still run after_all.
+    let before_all_ok = catch_unwind(AssertUnwindSafe(|| {
+        for hook in before_all {
+            hook();
+        }
+    }));
+
+    if let Err(e) = &before_all_ok {
+        let msg = panic_message(&**e);
+        let full_path = path.join(" > ");
+        println!("{indent}  {} before_all failed: {}", red("✗"), red(msg.as_ref()));
+        result.failed += 1;
+        result.failures.push(format!("{full_path} (before_all): {msg}"));
+    } else {
+        run_nodes(
+            children,
+            depth + 1,
+            path,
+            hooks,
+            focus_mode,
+            child_force_focused,
+            config,
+            result,
+        );
+    }
+
+    // Run after_all once at scope exit — even if before_all failed
+    if let Err(e) = catch_unwind(AssertUnwindSafe(|| {
+        for hook in after_all {
+            hook();
+        }
+    })) {
+        let msg = panic_message(&*e);
+        let full_path = path.join(" > ");
+        println!("{indent}  {} after_all failed: {}", red("✗"), red(msg.as_ref()));
+        result.failed += 1;
+        result.failures.push(format!("{full_path} (after_all): {msg}"));
+    }
+
+    // Pop this scope's layer, restoring outer-scope before_all values for the same types
+    crate::pop_scope_setup_layer();
+    hooks.pop_describe(saved_hooks);
+    path.pop();
+}
+
+/// Run an It node: apply filters, execute the test body with all decorators.
+///
+/// Handles focus mode, label filtering, path filtering, retries,
+/// must_pass_repeatedly, and timeout composition.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::cognitive_complexity)]
+fn run_it_node<'a>(
+    node: &'a TestNode,
+    depth: usize,
+    path: &mut Vec<String>,
+    hooks: &mut HookChain<'a>,
+    focus_mode: bool,
+    force_focused: bool,
+    config: &RunConfig,
+    result: &mut RunResult,
+) {
+    let TestNode::It {
+        name,
+        focused,
+        pending,
+        labels,
+        retries,
+        timeout_ms,
+        must_pass_repeatedly,
+        test_fn,
+    } = node
+    else {
+        unreachable!()
+    };
+
+    let indent = "  ".repeat(depth);
+
+    path.push(name.clone());
+    let full_path = path.join(" > ");
+    path.pop();
+
+    // Filter check
+    if let Some(ref f) = config.filter {
+        if !full_path.to_lowercase().contains(&f.to_lowercase()) {
+            return;
+        }
+    }
+
+    // Pending
+    if *pending {
+        println!("{indent}{} {}", yellow("-"), dim(name));
+        result.pending += 1;
+        return;
+    }
+
+    // Focus mode: skip non-focused
+    let effectively_focused = *focused || force_focused;
+    if focus_mode && !effectively_focused && !config.include_ignored {
+        result.skipped += 1;
+        return;
+    }
+
+    // Fail-on-focus CI check
+    if effectively_focused && focus_mode {
+        crate::check_fail_on_focus();
+    }
+
+    // Label check (merge accumulated + own)
+    let all_labels: Vec<&str> = hooks
+        .labels
+        .iter()
+        .copied()
+        .chain(labels.iter().map(|s| s.as_str()))
+        .collect();
+    if !crate::check_labels(&all_labels) {
+        return;
+    }
+
+    // Execute the test
+    let start = Instant::now();
+
+    let test_body = || {
+        // Run before_each + just_before_each + test body, catching any panic
+        // so that after_each and cleanups are guaranteed to run.
+        let body_result = catch_unwind(AssertUnwindSafe(|| {
+            for hook in &hooks.before_each {
+                hook();
+            }
+            for hook in &hooks.just_before_each {
+                hook();
+            }
+            test_fn();
+        }));
+
+        // after_each (innermost first) — each individually protected
+        let mut after_each_panic = None;
+        for hook in hooks.after_each.iter().rev() {
+            if let Err(e) = catch_unwind(AssertUnwindSafe(hook)) {
+                eprintln!("  warning: after_each hook panicked");
+                if after_each_panic.is_none() {
+                    after_each_panic = Some(e);
+                }
+            }
+        }
+
+        // Deferred cleanups
+        crate::run_deferred_cleanups();
+
+        // Clear per-test setup values between tests
+        crate::clear_setup_values();
+
+        // Propagate the first failure: body takes priority over after_each
+        if let Err(e) = body_result {
+            std::panic::resume_unwind(e);
+        }
+        if let Some(e) = after_each_panic {
+            std::panic::resume_unwind(e);
+        }
+    };
+
+    // Apply decorators compositionally so combinations behave as expected:
+    // retries -> must_pass_repeatedly -> timeout (outermost)
+    let with_retries = || {
+        if let Some(n) = *retries {
+            crate::with_retries(n, test_body);
+        } else {
+            test_body();
+        }
+    };
+
+    let with_must_pass_repeatedly = || {
+        if let Some(n) = *must_pass_repeatedly {
+            crate::must_pass_repeatedly(n, with_retries);
+        } else {
+            with_retries();
+        }
+    };
+
+    let outcome = if let Some(ms) = *timeout_ms {
+        run_with_timeout(ms, &with_must_pass_repeatedly)
+    } else {
+        catch_unwind(AssertUnwindSafe(with_must_pass_repeatedly))
+    };
+
+    // Check if the test called skip!() — report as skipped, not passed
+    if outcome.is_ok() {
+        if let Some(reason) = crate::take_skip_reason() {
+            println!(
+                "{indent}{} {} {}",
+                yellow("-"),
+                dim(name),
+                dim(&format!("({reason})"))
+            );
+            result.skipped += 1;
+        } else {
+            report_outcome(&indent, name, &full_path, outcome, start, result);
+        }
+    } else {
+        // Clear any skip flag set before the panic
+        let _ = crate::take_skip_reason();
+        report_outcome(&indent, name, &full_path, outcome, start, result);
+    }
+}
+
+/// Run an Ordered node: execute steps in sequence with fail-fast semantics.
+///
+/// Applies before_each/after_each hooks around the entire sequence.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn run_ordered_node<'a>(
+    node: &'a TestNode,
+    depth: usize,
+    path: &mut Vec<String>,
+    hooks: &mut HookChain<'a>,
+    focus_mode: bool,
+    force_focused: bool,
+    config: &RunConfig,
+    result: &mut RunResult,
+) {
+    let TestNode::Ordered {
+        name,
+        labels,
+        continue_on_failure,
+        steps,
+    } = node
+    else {
+        unreachable!()
+    };
+
+    let indent = "  ".repeat(depth);
+
+    path.push(name.clone());
+    let full_path = path.join(" > ");
+    path.pop();
+
+    // Filter check
+    if let Some(ref f) = config.filter {
+        if !full_path.to_lowercase().contains(&f.to_lowercase()) {
+            return;
+        }
+    }
+
+    // Focus mode: skip non-focused ordered tests unless include_ignored is set.
+    if focus_mode && !force_focused && !config.include_ignored {
+        result.skipped += 1;
+        return;
+    }
+
+    // Fail-on-focus CI check for ordered tests inside focused containers.
+    if force_focused && focus_mode {
+        crate::check_fail_on_focus();
+    }
+
+    // Label check
+    let all_labels: Vec<&str> = hooks
+        .labels
+        .iter()
+        .copied()
+        .chain(labels.iter().map(|s| s.as_str()))
+        .collect();
+    if !crate::check_labels(&all_labels) {
+        return;
+    }
+
+    let start = Instant::now();
+
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        // Run before_each + just_before_each + steps, catching any panic
+        // so that after_each and cleanups are guaranteed to run.
+        let body_result = catch_unwind(AssertUnwindSafe(|| {
+            for hook in &hooks.before_each {
+                hook();
+            }
+            for hook in &hooks.just_before_each {
+                hook();
+            }
+
+            let mut failures: Vec<Box<dyn std::any::Any + Send>> = Vec::new();
+            let total = steps.len();
+
+            for (i, step) in steps.iter().enumerate() {
+                eprintln!("  [{}/{}] {}", i + 1, total, step.name);
+                if *continue_on_failure {
+                    if let Err(e) = catch_unwind(AssertUnwindSafe(|| (step.body)())) {
+                        failures.push(e);
+                    }
+                } else {
+                    (step.body)();
+                }
+            }
+
+            if !failures.is_empty() {
+                panic!(
+                    "{} of {} ordered steps failed",
+                    failures.len(),
+                    steps.len()
+                );
+            }
+        }));
+
+        // after_each (innermost first) — each individually protected
+        let mut after_each_panic = None;
+        for hook in hooks.after_each.iter().rev() {
+            if let Err(e) = catch_unwind(AssertUnwindSafe(hook)) {
+                eprintln!("  warning: after_each hook panicked");
+                if after_each_panic.is_none() {
+                    after_each_panic = Some(e);
+                }
+            }
+        }
+
+        crate::run_deferred_cleanups();
+
+        // Clear per-test setup values (mirrors the It path)
+        crate::clear_setup_values();
+
+        // Propagate the first failure: body takes priority over after_each
+        if let Err(e) = body_result {
+            std::panic::resume_unwind(e);
+        }
+        if let Some(e) = after_each_panic {
+            std::panic::resume_unwind(e);
+        }
+    }));
+
+    report_outcome(&indent, name, &full_path, outcome, start, result);
 }
 
 /// Mark all descendant It nodes as pending (for xdescribe).
@@ -929,10 +1037,11 @@ fn report_outcome(
 
 /// Run a closure with a timeout.
 ///
-/// The closure runs on the current thread. A separate timer thread signals
-/// if the deadline is exceeded. Since we can't abort the current thread,
-/// the closure must finish before we can check the result — but if it takes
-/// too long, we report a timeout failure.
+/// The closure runs on the current thread. The timeout is checked *after*
+/// the closure returns — the closure cannot be forcibly aborted mid-execution.
+/// If the closure finishes within the deadline, its result is returned as-is.
+/// If it exceeds the deadline, a timeout error is returned regardless of
+/// whether the closure itself succeeded or failed.
 fn run_with_timeout(
     ms: u64,
     f: &dyn Fn(),
@@ -998,20 +1107,18 @@ fn print_summary(result: &RunResult, elapsed: std::time::Duration) {
     }
 }
 
-fn list_tree(nodes: &[TestNode], path: &[String], config: &RunConfig) {
+fn list_tree(nodes: &[TestNode], path: &mut Vec<String>, config: &RunConfig) {
     for node in nodes {
         match node {
             TestNode::Describe { name, children, .. } => {
-                let mut child_path = path.to_vec();
-                child_path.push(name.clone());
-                list_tree(children, &child_path, config);
+                path.push(name.clone());
+                list_tree(children, path, config);
+                path.pop();
             }
             TestNode::It { name, pending, .. } => {
-                let full_path = {
-                    let mut p = path.to_vec();
-                    p.push(name.clone());
-                    p.join(" > ")
-                };
+                path.push(name.clone());
+                let full_path = path.join(" > ");
+                path.pop();
 
                 if let Some(ref f) = config.filter {
                     if !full_path.to_lowercase().contains(&f.to_lowercase()) {
@@ -1026,11 +1133,9 @@ fn list_tree(nodes: &[TestNode], path: &[String], config: &RunConfig) {
                 }
             }
             TestNode::Ordered { name, .. } => {
-                let full_path = {
-                    let mut p = path.to_vec();
-                    p.push(name.clone());
-                    p.join(" > ")
-                };
+                path.push(name.clone());
+                let full_path = path.join(" > ");
+                path.pop();
 
                 if let Some(ref f) = config.filter {
                     if !full_path.to_lowercase().contains(&f.to_lowercase()) {

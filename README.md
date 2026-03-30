@@ -10,7 +10,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dev-dependencies]
-rsspec = "0.4"
+rsspec = "0.5"
 
 [[test]]
 name = "my_tests"
