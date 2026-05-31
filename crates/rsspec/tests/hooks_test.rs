@@ -2,8 +2,8 @@
 // itself is not the point of the test.
 #![allow(clippy::assertions_on_constants)]
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 fn main() {
     rsspec::run(|ctx| {
@@ -12,13 +12,14 @@ fn main() {
         // =================================================================
         ctx.describe("before_each", |ctx| {
             ctx.context("returning a simple value", |ctx| {
-                ctx.before_each(|| -> String {
-                    format!("hello-{}", 42)
-                });
+                ctx.before_each(|| -> String { format!("hello-{}", 42) });
 
-                ctx.it("passes the return value to it via &T", |greeting: &String| {
-                    assert_eq!(greeting, "hello-42");
-                });
+                ctx.it(
+                    "passes the return value to it via &T",
+                    |greeting: &String| {
+                        assert_eq!(greeting, "hello-42");
+                    },
+                );
             });
 
             ctx.context("returning a struct", |ctx| {
@@ -28,13 +29,19 @@ fn main() {
                 }
 
                 ctx.before_each(|| -> Response {
-                    Response { status: 200, body: "OK".to_string() }
+                    Response {
+                        status: 200,
+                        body: "OK".to_string(),
+                    }
                 });
 
-                ctx.it("works with any type, no Clone required", |resp: &Response| {
-                    assert_eq!(resp.status, 200);
-                    assert_eq!(resp.body, "OK");
-                });
+                ctx.it(
+                    "works with any type, no Clone required",
+                    |resp: &Response| {
+                        assert_eq!(resp.status, 200);
+                        assert_eq!(resp.body, "OK");
+                    },
+                );
             });
 
             ctx.context("with no return value", |ctx| {
@@ -48,9 +55,7 @@ fn main() {
             });
 
             ctx.context("test isolation", |ctx| {
-                ctx.before_each(|| -> Vec<i32> {
-                    vec![1, 2, 3]
-                });
+                ctx.before_each(|| -> Vec<i32> { vec![1, 2, 3] });
 
                 ctx.it("provides a fresh value to each test", |v: &Vec<i32>| {
                     assert_eq!(v, &[1, 2, 3]);
@@ -62,18 +67,17 @@ fn main() {
             });
 
             ctx.context("nested contexts", |ctx| {
-                ctx.before_each(|| -> String {
-                    "outer".to_string()
-                });
+                ctx.before_each(|| -> String { "outer".to_string() });
 
                 ctx.context("inner scope with its own before_each", |ctx| {
-                    ctx.before_each(|| -> String {
-                        "inner".to_string()
-                    });
+                    ctx.before_each(|| -> String { "inner".to_string() });
 
-                    ctx.it("receives the inner value for the same type", |val: &String| {
-                        assert_eq!(val, "inner");
-                    });
+                    ctx.it(
+                        "receives the inner value for the same type",
+                        |val: &String| {
+                            assert_eq!(val, "inner");
+                        },
+                    );
                 });
             });
         });
@@ -99,11 +103,14 @@ fn main() {
                     assert_eq!(scores.len(), 3);
                 });
 
-                ctx.it("extracts correct values", |scores: &HashMap<String, i32>| {
-                    assert_eq!(scores["alice"], 10);
-                    assert_eq!(scores["bob"], 20);
-                    assert_eq!(scores["carol"], 30);
-                });
+                ctx.it(
+                    "extracts correct values",
+                    |scores: &HashMap<String, i32>| {
+                        assert_eq!(scores["alice"], 10);
+                        assert_eq!(scores["bob"], 20);
+                        assert_eq!(scores["carol"], 30);
+                    },
+                );
             });
 
             ctx.context("building a complex object graph", |ctx| {
@@ -115,12 +122,7 @@ fn main() {
 
                 impl Tree {
                     fn depth(&self) -> usize {
-                        1 + self
-                            .children
-                            .iter()
-                            .map(|c| c.depth())
-                            .max()
-                            .unwrap_or(0)
+                        1 + self.children.iter().map(|c| c.depth()).max().unwrap_or(0)
                     }
 
                     fn count(&self) -> usize {
@@ -135,8 +137,14 @@ fn main() {
                             Tree {
                                 label: "child-1".into(),
                                 children: vec![
-                                    Tree { label: "grandchild-1a".into(), children: vec![] },
-                                    Tree { label: "grandchild-1b".into(), children: vec![] },
+                                    Tree {
+                                        label: "grandchild-1a".into(),
+                                        children: vec![],
+                                    },
+                                    Tree {
+                                        label: "grandchild-1b".into(),
+                                        children: vec![],
+                                    },
                                 ],
                             },
                             Tree {
@@ -201,7 +209,11 @@ fn main() {
                     for token in &tokens {
                         *frequencies.entry(token.clone()).or_insert(0) += 1;
                     }
-                    Pipeline { input, tokens, frequencies }
+                    Pipeline {
+                        input,
+                        tokens,
+                        frequencies,
+                    }
                 });
 
                 ctx.it("tokenizes the input", |p: &Pipeline| {
@@ -245,9 +257,7 @@ fn main() {
         // =================================================================
         ctx.describe("before_all and after_all", |ctx| {
             ctx.context("returning a value", |ctx| {
-                ctx.before_all(|| -> String {
-                    "shared-config".to_string()
-                });
+                ctx.before_all(|| -> String { "shared-config".to_string() });
 
                 ctx.it("is available in the first test", |config: &String| {
                     assert_eq!(config, "shared-config");
@@ -295,10 +305,13 @@ fn main() {
                     assert_eq!(config.max_connections, 10);
                 });
 
-                ctx.it("provides the same config to subsequent tests", |config: &Config| {
-                    assert_eq!(config.features.len(), 3);
-                    assert!(config.features.contains(&"auth".to_string()));
-                });
+                ctx.it(
+                    "provides the same config to subsequent tests",
+                    |config: &Config| {
+                        assert_eq!(config.features.len(), 3);
+                        assert!(config.features.contains(&"auth".to_string()));
+                    },
+                );
             });
         });
 
@@ -338,41 +351,51 @@ fn main() {
         // before_all — nested scope isolation
         // =================================================================
         ctx.describe("before_all nested scope isolation", |ctx| {
-            ctx.context("outer and inner both register before_all for the same type", |ctx| {
-                ctx.before_all(|| -> String { "outer".to_string() });
+            ctx.context(
+                "outer and inner both register before_all for the same type",
+                |ctx| {
+                    ctx.before_all(|| -> String { "outer".to_string() });
 
-                ctx.context("inner scope", |ctx| {
-                    ctx.before_all(|| -> String { "inner".to_string() });
+                    ctx.context("inner scope", |ctx| {
+                        ctx.before_all(|| -> String { "inner".to_string() });
 
-                    ctx.it("receives the inner value inside the inner scope", |val: &String| {
-                        assert_eq!(val, "inner");
+                        ctx.it(
+                            "receives the inner value inside the inner scope",
+                            |val: &String| {
+                                assert_eq!(val, "inner");
+                            },
+                        );
                     });
-                });
 
-                // This test runs after the inner scope has closed.
-                // Regression: a flat-map implementation would have cleared the outer
-                // value when the inner scope ended. The scope stack must restore it.
-                ctx.it("receives the outer value after inner scope closes", |val: &String| {
-                    assert_eq!(val, "outer");
-                });
-            });
+                    // This test runs after the inner scope has closed.
+                    // Regression: a flat-map implementation would have cleared the outer
+                    // value when the inner scope ended. The scope stack must restore it.
+                    ctx.it(
+                        "receives the outer value after inner scope closes",
+                        |val: &String| {
+                            assert_eq!(val, "outer");
+                        },
+                    );
+                },
+            );
         });
 
         // =================================================================
         // just_before_each — runs after before_each, before the test
         // =================================================================
         ctx.describe("just_before_each", |ctx| {
-            ctx.before_each(|| -> u32 {
-                1
-            });
+            ctx.before_each(|| -> u32 { 1 });
 
             ctx.just_before_each(|| {
                 // Runs after before_each — the return value is already stored
             });
 
-            ctx.it("runs after before_each but before the test body", |val: &u32| {
-                assert_eq!(*val, 1);
-            });
+            ctx.it(
+                "runs after before_each but before the test body",
+                |val: &u32| {
+                    assert_eq!(*val, 1);
+                },
+            );
         });
     });
 }

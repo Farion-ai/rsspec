@@ -12,6 +12,9 @@ description = "A Ginkgo/RSpec-inspired BDD testing framework for Rust."
 default = []
 googletest = ["dep:googletest"]
 tokio = ["dep:tokio"]
+# Run distinct top-level describe/it/ordered subtrees on worker threads.
+# Adds a `Send` bound to all test/hook closures (see MaybeSend in lib.rs).
+parallel = []
 
 [dependencies]
 googletest = { version = "0.14", optional = true }
@@ -37,4 +40,9 @@ harness = false
 name = "async_test"
 harness = false
 required-features = ["tokio"]
+
+[[test]]
+name = "parallel_test"
+harness = false
+required-features = ["parallel"]
 

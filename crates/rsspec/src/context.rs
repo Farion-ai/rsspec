@@ -21,17 +21,17 @@ pub struct WithSetup<T>(std::marker::PhantomData<T>);
 /// It is not intended as a user extension point.
 #[doc(hidden)]
 pub trait IntoTestBody<Marker> {
-    fn into_test_fn(self) -> Box<dyn Fn()>;
+    fn into_test_fn(self) -> crate::TestBody;
 }
 
-impl<F: Fn() + 'static> IntoTestBody<Plain> for F {
-    fn into_test_fn(self) -> Box<dyn Fn()> {
+impl<F: Fn() + crate::MaybeSend + 'static> IntoTestBody<Plain> for F {
+    fn into_test_fn(self) -> crate::TestBody {
         Box::new(self)
     }
 }
 
-impl<T: 'static, F: Fn(&T) + 'static> IntoTestBody<WithSetup<T>> for F {
-    fn into_test_fn(self) -> Box<dyn Fn()> {
+impl<T: 'static, F: Fn(&T) + crate::MaybeSend + 'static> IntoTestBody<WithSetup<T>> for F {
+    fn into_test_fn(self) -> crate::TestBody {
         Box::new(move || {
             crate::with_setup_value::<T, _>(|val| self(val));
         })
@@ -55,11 +55,11 @@ struct GroupFrame {
     focused: bool,
     pending: bool,
     labels: Vec<String>,
-    before_each: Vec<Box<dyn Fn()>>,
-    after_each: Vec<Box<dyn Fn()>>,
-    before_all: Vec<Box<dyn Fn()>>,
-    after_all: Vec<Box<dyn Fn()>>,
-    just_before_each: Vec<Box<dyn Fn()>>,
+    before_each: Vec<crate::TestBody>,
+    after_each: Vec<crate::TestBody>,
+    before_all: Vec<crate::TestBody>,
+    after_all: Vec<crate::TestBody>,
+    just_before_each: Vec<crate::TestBody>,
     children: Vec<TestNode>,
 }
 
@@ -123,23 +123,23 @@ impl SuiteBuilder {
         self.current_frame_mut().children.push(node);
     }
 
-    fn add_before_each(&mut self, hook: Box<dyn Fn()>) {
+    fn add_before_each(&mut self, hook: crate::TestBody) {
         self.current_frame_mut().before_each.push(hook);
     }
 
-    fn add_after_each(&mut self, hook: Box<dyn Fn()>) {
+    fn add_after_each(&mut self, hook: crate::TestBody) {
         self.current_frame_mut().after_each.push(hook);
     }
 
-    fn add_before_all(&mut self, hook: Box<dyn Fn()>) {
+    fn add_before_all(&mut self, hook: crate::TestBody) {
         self.current_frame_mut().before_all.push(hook);
     }
 
-    fn add_after_all(&mut self, hook: Box<dyn Fn()>) {
+    fn add_after_all(&mut self, hook: crate::TestBody) {
         self.current_frame_mut().after_all.push(hook);
     }
 
-    fn add_just_before_each(&mut self, hook: Box<dyn Fn()>) {
+    fn add_just_before_each(&mut self, hook: crate::TestBody) {
         self.current_frame_mut().just_before_each.push(hook);
     }
 
@@ -317,18 +317,20 @@ impl Context {
     /// ctx.it("no fixture needed", || { assert!(true); });
     /// # }); }
     /// ```
-    pub fn before_each<T: 'static>(&self, hook: impl Fn() -> T + 'static) {
-        with_builder(|b| b.add_before_each(Box::new(move || {
-            let val = hook();
-            if std::any::TypeId::of::<T>() != std::any::TypeId::of::<()>() {
-                crate::store_setup_value(val);
-            }
-        })));
+    pub fn before_each<T: 'static>(&self, hook: impl Fn() -> T + crate::MaybeSend + 'static) {
+        with_builder(|b| {
+            b.add_before_each(Box::new(move || {
+                let val = hook();
+                if std::any::TypeId::of::<T>() != std::any::TypeId::of::<()>() {
+                    crate::store_setup_value(val);
+                }
+            }))
+        });
     }
 
     /// Register a hook that runs after every test in this scope and nested scopes,
     /// even if the test panics. Multiple `after_each` hooks run inner-to-outer.
-    pub fn after_each(&self, hook: impl Fn() + 'static) {
+    pub fn after_each(&self, hook: impl Fn() + crate::MaybeSend + 'static) {
         with_builder(|b| b.add_after_each(Box::new(hook)));
     }
 
@@ -338,24 +340,26 @@ impl Context {
     /// If the closure returns a value, it is stored and can be received by
     /// `it` blocks via a `|val: &T|` parameter. The value persists across
     /// all tests in the scope (not cleared between tests).
-    pub fn before_all<T: 'static>(&self, hook: impl Fn() -> T + 'static) {
-        with_builder(|b| b.add_before_all(Box::new(move || {
-            let val = hook();
-            if std::any::TypeId::of::<T>() != std::any::TypeId::of::<()>() {
-                crate::store_scope_setup_value(val);
-            }
-        })));
+    pub fn before_all<T: 'static>(&self, hook: impl Fn() -> T + crate::MaybeSend + 'static) {
+        with_builder(|b| {
+            b.add_before_all(Box::new(move || {
+                let val = hook();
+                if std::any::TypeId::of::<T>() != std::any::TypeId::of::<()>() {
+                    crate::store_scope_setup_value(val);
+                }
+            }))
+        });
     }
 
     /// Register a hook that runs once after all tests in this describe scope.
     /// Not inherited by nested scopes. Runs even if `before_all` panicked.
-    pub fn after_all(&self, hook: impl Fn() + 'static) {
+    pub fn after_all(&self, hook: impl Fn() + crate::MaybeSend + 'static) {
         with_builder(|b| b.add_after_all(Box::new(hook)));
     }
 
     /// Register a hook that runs after all `before_each` hooks but immediately
     /// before the test body. Useful for final setup that must run last.
-    pub fn just_before_each(&self, hook: impl Fn() + 'static) {
+    pub fn just_before_each(&self, hook: impl Fn() + crate::MaybeSend + 'static) {
         with_builder(|b| b.add_just_before_each(Box::new(hook)));
     }
 
@@ -447,7 +451,7 @@ impl Context {
     /// ```
     pub fn async_it<F, Fut>(&self, name: &str, body: F) -> ItBuilder
     where
-        F: Fn() -> Fut + 'static,
+        F: Fn() -> Fut + crate::MaybeSend + 'static,
         Fut: std::future::Future<Output = ()> + 'static,
     {
         self.it(name, crate::async_test(body))
@@ -456,7 +460,7 @@ impl Context {
     /// Focused variant of [`async_it`](Self::async_it).
     pub fn async_fit<F, Fut>(&self, name: &str, body: F) -> ItBuilder
     where
-        F: Fn() -> Fut + 'static,
+        F: Fn() -> Fut + crate::MaybeSend + 'static,
         Fut: std::future::Future<Output = ()> + 'static,
     {
         self.fit(name, crate::async_test(body))
@@ -465,7 +469,7 @@ impl Context {
     /// Pending variant of [`async_it`](Self::async_it).
     pub fn async_xit<F, Fut>(&self, name: &str, body: F) -> ItBuilder
     where
-        F: Fn() -> Fut + 'static,
+        F: Fn() -> Fut + crate::MaybeSend + 'static,
         Fut: std::future::Future<Output = ()> + 'static,
     {
         self.xit(name, crate::async_test(body))
@@ -474,7 +478,7 @@ impl Context {
     /// Alias for [`async_it`](Self::async_it).
     pub fn async_specify<F, Fut>(&self, name: &str, body: F) -> ItBuilder
     where
-        F: Fn() -> Fut + 'static,
+        F: Fn() -> Fut + crate::MaybeSend + 'static,
         Fut: std::future::Future<Output = ()> + 'static,
     {
         self.async_it(name, body)
@@ -483,7 +487,7 @@ impl Context {
     /// Alias for [`async_fit`](Self::async_fit).
     pub fn async_fspecify<F, Fut>(&self, name: &str, body: F) -> ItBuilder
     where
-        F: Fn() -> Fut + 'static,
+        F: Fn() -> Fut + crate::MaybeSend + 'static,
         Fut: std::future::Future<Output = ()> + 'static,
     {
         self.async_fit(name, body)
@@ -492,7 +496,7 @@ impl Context {
     /// Alias for [`async_xit`](Self::async_xit).
     pub fn async_xspecify<F, Fut>(&self, name: &str, body: F) -> ItBuilder
     where
-        F: Fn() -> Fut + 'static,
+        F: Fn() -> Fut + crate::MaybeSend + 'static,
         Fut: std::future::Future<Output = ()> + 'static,
     {
         self.async_xit(name, body)
@@ -509,7 +513,7 @@ impl Context {
     /// in a `static` or use `async_before_each` for side-effects only.
     pub fn async_before_each<F, Fut>(&self, hook: F)
     where
-        F: Fn() -> Fut + 'static,
+        F: Fn() -> Fut + crate::MaybeSend + 'static,
         Fut: std::future::Future<Output = ()> + 'static,
     {
         self.before_each(crate::async_test(hook));
@@ -519,7 +523,7 @@ impl Context {
     /// Each invocation runs on a fresh single-threaded Tokio runtime.
     pub fn async_after_each<F, Fut>(&self, hook: F)
     where
-        F: Fn() -> Fut + 'static,
+        F: Fn() -> Fut + crate::MaybeSend + 'static,
         Fut: std::future::Future<Output = ()> + 'static,
     {
         self.after_each(crate::async_test(hook));
@@ -532,7 +536,7 @@ impl Context {
     /// See [`async_before_each`](Self::async_before_each) for details.
     pub fn async_before_all<F, Fut>(&self, hook: F)
     where
-        F: Fn() -> Fut + 'static,
+        F: Fn() -> Fut + crate::MaybeSend + 'static,
         Fut: std::future::Future<Output = ()> + 'static,
     {
         self.before_all(crate::async_test(hook));
@@ -542,7 +546,7 @@ impl Context {
     /// Runs on a fresh single-threaded Tokio runtime.
     pub fn async_after_all<F, Fut>(&self, hook: F)
     where
-        F: Fn() -> Fut + 'static,
+        F: Fn() -> Fut + crate::MaybeSend + 'static,
         Fut: std::future::Future<Output = ()> + 'static,
     {
         self.after_all(crate::async_test(hook));
@@ -552,7 +556,7 @@ impl Context {
     /// Each invocation runs on a fresh single-threaded Tokio runtime.
     pub fn async_just_before_each<F, Fut>(&self, hook: F)
     where
-        F: Fn() -> Fut + 'static,
+        F: Fn() -> Fut + crate::MaybeSend + 'static,
         Fut: std::future::Future<Output = ()> + 'static,
     {
         self.just_before_each(crate::async_test(hook));
@@ -580,7 +584,7 @@ impl Context {
 /// ```
 pub struct ItBuilder {
     name: String,
-    body: Option<Box<dyn Fn()>>,
+    body: Option<crate::TestBody>,
     focused: bool,
     pending: bool,
     labels: Vec<String>,
@@ -590,7 +594,7 @@ pub struct ItBuilder {
 }
 
 impl ItBuilder {
-    fn new(name: String, body: Box<dyn Fn()>, focused: bool, pending: bool) -> Self {
+    fn new(name: String, body: crate::TestBody, focused: bool, pending: bool) -> Self {
         ItBuilder {
             name,
             body: Some(body),
@@ -707,13 +711,14 @@ pub fn run(body: impl FnOnce(Context)) {
             filter: None,
             list: false,
             include_ignored: false,
+            parallelism: 1,
         }
     } else {
         RunConfig::from_args()
     };
 
     let suite = Suite::new("", nodes);
-    let result = runner::run_suites(&[suite], &config);
+    let result = runner::run_suites(vec![suite], &config);
 
     if result.failed > 0 {
         if inside_harness {
@@ -725,10 +730,7 @@ pub fn run(body: impl FnOnce(Context)) {
                 .map(|(i, f)| format!("  {}. {}", i + 1, f))
                 .collect::<Vec<_>>()
                 .join("\n");
-            panic!(
-                "rsspec: {} test(s) failed\n{}",
-                result.failed, details
-            );
+            panic!("rsspec: {} test(s) failed\n{}", result.failed, details);
         } else {
             std::process::exit(1);
         }
@@ -759,9 +761,10 @@ pub fn run_inline(body: impl FnOnce(Context)) {
         filter: None,
         list: false,
         include_ignored: false,
+        parallelism: 1,
     };
     let suite = Suite::new("", nodes);
-    let result = runner::run_suites(&[suite], &config);
+    let result = runner::run_suites(vec![suite], &config);
 
     if result.failed > 0 {
         let details = result
@@ -771,9 +774,6 @@ pub fn run_inline(body: impl FnOnce(Context)) {
             .map(|(i, f)| format!("  {}. {}", i + 1, f))
             .collect::<Vec<_>>()
             .join("\n");
-        panic!(
-            "rsspec: {} test(s) failed\n{}",
-            result.failed, details
-        );
+        panic!("rsspec: {} test(s) failed\n{}", result.failed, details);
     }
 }

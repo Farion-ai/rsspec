@@ -31,6 +31,14 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # Verify every feature combination compiles — the `parallel` feature
+      # changes trait bounds, so each {parallel, tokio, googletest} combo must
+      # be checked, not just the all-on / all-off extremes.
+      - name: Feature matrix check
+        run: |
+          cargo install cargo-hack --locked
+          cargo hack --feature-powerset --all-targets check
+
       - name: Test
         run: cargo test --all-features
 

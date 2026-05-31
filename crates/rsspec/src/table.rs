@@ -79,13 +79,17 @@ impl<T: 'static> TypedTableBuilder<T> {
     /// Run all cases. Each case becomes a separate test node.
     ///
     /// The test function receives a reference to the data for each case.
-    pub fn run(self, test_fn: impl Fn(&T) + 'static) {
+    pub fn run(self, test_fn: impl Fn(&T) + crate::MaybeSendSync + 'static)
+    where
+        T: crate::MaybeSend,
+    {
         with_builder(|b| b.push_group(self.name, false, false));
 
         let test_fn = Arc::new(test_fn);
 
         for (label, data) in self.cases {
-            let test_fn = test_fn.clone();
+            // O(1) refcount bump — shares one test_fn across all cases.
+            let test_fn = Arc::clone(&test_fn);
 
             // Data is owned by the closure and passed by reference to test_fn.
             // This makes the closure Fn() — callable multiple times (for retries).
@@ -128,8 +132,9 @@ impl<T: 'static> TypedTableBuilder<T> {
     #[cfg(feature = "tokio")]
     pub fn async_run<F, Fut>(self, test_fn: F)
     where
-        F: Fn(&T) -> Fut + 'static,
+        F: Fn(&T) -> Fut + crate::MaybeSendSync + 'static,
         Fut: std::future::Future<Output = ()> + 'static,
+        T: crate::MaybeSend,
     {
         self.run(move |arg: &T| {
             let rt = tokio::runtime::Builder::new_current_thread()

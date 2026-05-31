@@ -33,7 +33,7 @@ impl OrderedContext {
     }
 
     /// Add a named step to the sequence.
-    pub fn step(&mut self, name: &str, body: impl Fn() + 'static) {
+    pub fn step(&mut self, name: &str, body: impl Fn() + crate::MaybeSend + 'static) {
         self.steps.push(OrderedStep {
             name: name.to_string(),
             body: Box::new(body),
@@ -51,7 +51,7 @@ impl OrderedContext {
     #[cfg(feature = "tokio")]
     pub fn async_step<F, Fut>(&mut self, name: &str, body: F)
     where
-        F: Fn() -> Fut + 'static,
+        F: Fn() -> Fut + crate::MaybeSend + 'static,
         Fut: std::future::Future<Output = ()> + 'static,
     {
         self.step(name, crate::async_test(body));

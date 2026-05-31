@@ -26,13 +26,15 @@
 //!
 //! - `googletest` — re-exports `googletest` matchers via `rsspec::matchers`
 //! - `tokio` — async test support via `async_it`, `async_before_each`, etc.
+//! - `parallel` — run distinct top-level subtrees on worker threads (adds a
+//!   `Send` bound to test/hook closures; see `--parallel` / `RSSPEC_PARALLEL`)
 
-pub(crate) mod runner;
 mod context;
 pub(crate) mod ordered;
+pub(crate) mod runner;
 pub(crate) mod table;
 
-pub use context::{Context, ItBuilder, run, run_inline};
+pub use context::{run, run_inline, Context, ItBuilder};
 
 /// Re-export of the [`googletest`] crate. Available with the `googletest` feature.
 #[cfg(feature = "googletest")]
@@ -43,6 +45,60 @@ pub use googletest;
 pub mod matchers {
     pub use googletest::prelude::*;
 }
+
+// ============================================================================
+// Send gating for parallel execution
+// ============================================================================
+//
+// A `dyn Fn` trait object bakes its auto-traits into its type, so the `Send`
+// requirement cannot depend on a runtime `parallelism` value — only on a
+// compile-time `cfg`. We therefore gate it behind the `parallel` feature.
+//
+// With the feature **off**, `MaybeSend`/`MaybeSendSync` are blanket no-ops and
+// `TestBody` is `Box<dyn Fn()>` — the API is byte-for-byte what it was before,
+// and `!Send` test bodies (capturing `Rc`/`RefCell`) still compile.
+//
+// With the feature **on**, the markers force `Send`/`Send + Sync` and test/hook
+// closures must be `Send` so they can be moved onto worker threads.
+
+// These markers are `pub` only because they appear in the bounds of public
+// methods — users never name them. They are `#[doc(hidden)]` (and not an
+// extension point) precisely because their definition flips with the `parallel`
+// cfg; writing `where F: rsspec::MaybeSend` would couple user code to that flip.
+
+/// Marker requiring `Send` when the `parallel` feature is enabled, otherwise a no-op.
+#[doc(hidden)]
+#[cfg(feature = "parallel")]
+pub trait MaybeSend: Send {}
+#[cfg(feature = "parallel")]
+impl<T: Send> MaybeSend for T {}
+/// Marker requiring `Send` when the `parallel` feature is enabled, otherwise a no-op.
+#[doc(hidden)]
+#[cfg(not(feature = "parallel"))]
+pub trait MaybeSend {}
+#[cfg(not(feature = "parallel"))]
+impl<T> MaybeSend for T {}
+
+/// Marker requiring `Send + Sync` when the `parallel` feature is enabled, otherwise a no-op.
+#[doc(hidden)]
+#[cfg(feature = "parallel")]
+pub trait MaybeSendSync: Send + Sync {}
+#[cfg(feature = "parallel")]
+impl<T: Send + Sync> MaybeSendSync for T {}
+/// Marker requiring `Send + Sync` when the `parallel` feature is enabled, otherwise a no-op.
+#[doc(hidden)]
+#[cfg(not(feature = "parallel"))]
+pub trait MaybeSendSync {}
+#[cfg(not(feature = "parallel"))]
+impl<T> MaybeSendSync for T {}
+
+/// Boxed test/hook body. Gains a `+ Send` bound under the `parallel` feature so
+/// that whole top-level subtrees can be moved onto worker threads.
+#[cfg(feature = "parallel")]
+pub(crate) type TestBody = Box<dyn Fn() + Send>;
+/// Boxed test/hook body (sequential build — no `Send` bound).
+#[cfg(not(feature = "parallel"))]
+pub(crate) type TestBody = Box<dyn Fn()>;
 
 // ============================================================================
 // Async test support (requires `tokio` feature)
@@ -64,7 +120,7 @@ pub mod matchers {
 #[cfg(feature = "tokio")]
 pub fn async_test<F, Fut>(f: F) -> impl Fn() + 'static
 where
-    F: Fn() -> Fut + 'static,
+    F: Fn() -> Fut + MaybeSend + 'static,
     Fut: std::future::Future<Output = ()> + 'static,
 {
     move || {
@@ -76,8 +132,8 @@ where
     }
 }
 
-use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::cell::RefCell;
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 
 thread_local! {
     /// Per-thread flag to suppress panic output during retries.
@@ -251,6 +307,15 @@ pub(crate) fn check_fail_on_focus() {
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
+// INVARIANT (parallel feature): these fixture stores are `thread_local!`, which
+// is exactly what gives per-subtree isolation under parallel execution — each
+// worker thread has its own copy. This holds ONLY because the runner's unit of
+// parallelism is one whole top-level subtree per worker (see
+// `render_suites_parallel` in runner.rs), so a single subtree's
+// before_all/before_each/it/after_each/after_all/cleanup all run on one thread.
+// Do not move these to a `static`/`Arc`, and do not parallelize *within* a
+// subtree, without redesigning fixture storage — either silently breaks
+// isolation with no compile error.
 thread_local! {
     /// Per-test values from returning `before_each`. Cleared between tests.
     static SETUP_STORE: RefCell<HashMap<TypeId, Box<dyn Any>>> = RefCell::new(HashMap::new());
@@ -320,9 +385,9 @@ pub(crate) fn with_setup_value<T: 'static, R>(f: impl FnOnce(&T) -> R) -> R {
             let stack = cell.borrow();
             for layer in stack.iter().rev() {
                 if let Some(boxed) = layer.get(&tid) {
-                    return f(boxed
-                        .downcast_ref::<T>()
-                        .expect("rsspec: TypeId/value type mismatch — internal invariant violated"));
+                    return f(boxed.downcast_ref::<T>().expect(
+                        "rsspec: TypeId/value type mismatch — internal invariant violated",
+                    ));
                 }
             }
             panic!(
@@ -468,9 +533,15 @@ mod tests {
     #[test]
     fn test_labels_and_filter_with_negation() {
         // Has integration, not slow → should run
-        assert!(labels_match_filter(&["integration", "fast"], "integration+!slow"));
+        assert!(labels_match_filter(
+            &["integration", "fast"],
+            "integration+!slow"
+        ));
         // Has integration AND slow → should be excluded
-        assert!(!labels_match_filter(&["integration", "slow"], "integration+!slow"));
+        assert!(!labels_match_filter(
+            &["integration", "slow"],
+            "integration+!slow"
+        ));
         // Missing integration → should be excluded
         assert!(!labels_match_filter(&["fast"], "integration+!slow"));
     }
@@ -483,7 +554,10 @@ mod tests {
         // Has slow → excluded by negation
         assert!(!labels_match_filter(&["slow"], "integration,!slow"));
         // Has integration + slow → excluded despite matching positive
-        assert!(!labels_match_filter(&["integration", "slow"], "integration,!slow"));
+        assert!(!labels_match_filter(
+            &["integration", "slow"],
+            "integration,!slow"
+        ));
         // Has only "fast" → positive "integration" not matched → excluded
         assert!(!labels_match_filter(&["fast"], "integration,!slow"));
     }

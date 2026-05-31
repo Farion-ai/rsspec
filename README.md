@@ -375,6 +375,45 @@ ctx.it("manual async", rsspec::async_test(|| async {
 - **Do not create a nested Tokio runtime** inside an async test. Calling `Runtime::new()` inside an `async_it` block will panic with "Cannot start a runtime from within a runtime."
 - The `|| async { ... }` pattern (closure returning a future) is required because Rust's `async Fn()` trait is not yet stable.
 
+## Parallel Execution
+
+By default rsspec runs every spec sequentially on one thread. Enable the
+`parallel` feature to run **distinct top-level subtrees** on a pool of worker
+threads:
+
+```toml
+[dev-dependencies]
+rsspec = { version = "0.6", features = ["parallel"] }
+```
+
+```bash
+# Pick a worker count at runtime (CLI flag, env var, or `auto` for core count):
+cargo test --test my_spec --features parallel -- --parallel=4
+RSSPEC_PARALLEL=auto cargo test --test my_spec --features parallel
+```
+
+The unit of parallelism is one **top-level** `describe` / `it` / `ordered`
+node. Each runs entirely on a single worker, so `before_all` still executes once
+per subtree and fixtures stay isolated — exactly like Jest runs files in parallel
+but specs within a file in order. Output is buffered per subtree and flushed in
+tree order, so it stays deterministic regardless of which worker finishes first.
+
+**The `parallel` feature adds a `Send` bound to every test and hook closure** so
+they can move onto worker threads. This is gated behind the feature precisely
+because a `dyn Fn` trait object bakes its auto-traits into its type — the
+requirement cannot depend on the runtime worker count. With the feature off, the
+API is unchanged and `!Send` bodies (capturing `Rc`/`RefCell`) still compile.
+
+**Caveats:**
+
+- Only distinct top-level subtrees run concurrently; specs within a subtree stay serial.
+- Tests sharing **process-global mutable state** (`static mut`, shared atomics across subtrees, env vars, the current directory, shared files/ports) can race. Group them under one top-level `describe`, or run sequentially.
+- Tests that install their own panic hook via `std::panic::set_hook` / `take_hook` are **unsupported** under `--parallel`: the panic hook is process-global and shared across all workers, so it races with rsspec's own hook and with other subtrees' panics.
+- `--filter`, focus mode (`fit`/`fdescribe`), labels, and `xit`/pending apply identically.
+- Async is unaffected — each async test still builds its own current-thread runtime inside the test body.
+- The buffered tree output is deterministic; **stderr** (ordered-step echoes, retry notices) still interleaves.
+- Without the `parallel` feature, `--parallel`/`RSSPEC_PARALLEL` are accepted but warn and run sequentially.
+
 ## Runtime Helpers
 
 ### defer_cleanup
@@ -427,6 +466,7 @@ ctx.it("requires a database", || {
 | --- | --- |
 | `RSSPEC_LABEL_FILTER` | Filter tests by labels. `integration` = match label, `!slow` = exclude, `a,b` = OR, `a+b` = AND |
 | `RSSPEC_FAIL_ON_FOCUS` | Set to `1` or `true` to fail when focused tests exist (CI safety) |
+| `RSSPEC_PARALLEL` | Worker count for the `parallel` feature: a positive integer or `auto`. Overridden by `--parallel`. Ignored (warns) without the feature |
 | `NO_COLOR` | Disable colored output |
 
 ## Shared State Patterns
