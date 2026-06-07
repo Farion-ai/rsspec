@@ -177,17 +177,6 @@ impl<F: FnOnce()> Drop for Guard<F> {
     }
 }
 
-/// Check if the current test's labels match the `RSSPEC_LABEL_FILTER` env var.
-///
-/// Returns `true` (run the test) if no filter is set.
-pub(crate) fn check_labels(labels: &[&str]) -> bool {
-    let filter = match std::env::var("RSSPEC_LABEL_FILTER") {
-        Ok(f) if !f.is_empty() => f,
-        _ => return true,
-    };
-    labels_match_filter(labels, &filter)
-}
-
 /// Check if labels match a filter string.
 ///
 /// Filter syntax:
@@ -210,9 +199,9 @@ pub(crate) fn labels_match_filter(labels: &[&str], filter: &str) -> bool {
         return filter.split('+').all(|term| {
             let term = term.trim();
             if let Some(negated) = term.strip_prefix('!') {
-                !labels.contains(&negated)
+                !atom_present(negated, labels)
             } else {
-                labels.contains(&term)
+                atom_present(term, labels)
             }
         });
     }
@@ -226,12 +215,12 @@ pub(crate) fn labels_match_filter(labels: &[&str], filter: &str) -> bool {
         let term = term.trim();
         if let Some(negated) = term.strip_prefix('!') {
             // Negative terms are exclusions: if any matches, exclude the test
-            if labels.contains(&negated) {
+            if atom_present(negated, labels) {
                 return false;
             }
         } else {
             has_positive = true;
-            if labels.contains(&term) {
+            if atom_present(term, labels) {
                 positive_match = true;
             }
         }
@@ -240,6 +229,211 @@ pub(crate) fn labels_match_filter(labels: &[&str], filter: &str) -> bool {
     // If there were positive terms, at least one must have matched.
     // If only negative terms, they all passed (none excluded).
     !has_positive || positive_match
+}
+
+/// Glob-match a label `pattern` (supporting `*` wildcards, no `?`) against `text`.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let mut star: Option<usize> = None;
+    let mut mark = 0usize;
+    while ti < t.len() {
+        if pi < p.len() && p[pi] == t[ti] {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+/// Does any of `labels` match the (possibly glob) `pattern`?
+fn atom_present(pattern: &str, labels: &[&str]) -> bool {
+    labels.iter().any(|l| glob_match(pattern, l))
+}
+
+/// A token in the boolean label-filter grammar.
+#[derive(Debug)]
+enum FilterTok {
+    And,
+    Or,
+    Not,
+    LParen,
+    RParen,
+    Atom(String),
+}
+
+/// Tokenize a boolean label filter. Atoms are maximal runs of non-operator,
+/// non-whitespace characters, so `pg:edge-*` is a single atom.
+fn tokenize_filter(s: &str) -> Result<Vec<FilterTok>, String> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut toks = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            ' ' | '\t' => i += 1,
+            '(' => {
+                toks.push(FilterTok::LParen);
+                i += 1;
+            }
+            ')' => {
+                toks.push(FilterTok::RParen);
+                i += 1;
+            }
+            '!' => {
+                toks.push(FilterTok::Not);
+                i += 1;
+            }
+            '&' => {
+                if chars.get(i + 1) == Some(&'&') {
+                    toks.push(FilterTok::And);
+                    i += 2;
+                } else {
+                    return Err("expected `&&`".to_string());
+                }
+            }
+            '|' => {
+                if chars.get(i + 1) == Some(&'|') {
+                    toks.push(FilterTok::Or);
+                    i += 2;
+                } else {
+                    return Err("expected `||`".to_string());
+                }
+            }
+            _ => {
+                let start = i;
+                while i < chars.len()
+                    && !matches!(chars[i], ' ' | '\t' | '(' | ')' | '!' | '&' | '|')
+                {
+                    i += 1;
+                }
+                toks.push(FilterTok::Atom(chars[start..i].iter().collect()));
+            }
+        }
+    }
+    Ok(toks)
+}
+
+/// Recursive-descent evaluator. Precedence: `!` (tightest) > `&&` > `||`.
+struct FilterParser<'a> {
+    toks: &'a [FilterTok],
+    pos: usize,
+    labels: &'a [&'a str],
+}
+
+impl FilterParser<'_> {
+    fn eval_or(&mut self) -> Result<bool, String> {
+        let mut v = self.eval_and()?;
+        while matches!(self.toks.get(self.pos), Some(FilterTok::Or)) {
+            self.pos += 1;
+            let rhs = self.eval_and()?;
+            v = v || rhs;
+        }
+        Ok(v)
+    }
+
+    fn eval_and(&mut self) -> Result<bool, String> {
+        let mut v = self.eval_unary()?;
+        while matches!(self.toks.get(self.pos), Some(FilterTok::And)) {
+            self.pos += 1;
+            let rhs = self.eval_unary()?;
+            v = v && rhs;
+        }
+        Ok(v)
+    }
+
+    fn eval_unary(&mut self) -> Result<bool, String> {
+        if matches!(self.toks.get(self.pos), Some(FilterTok::Not)) {
+            self.pos += 1;
+            Ok(!self.eval_unary()?)
+        } else {
+            self.eval_primary()
+        }
+    }
+
+    fn eval_primary(&mut self) -> Result<bool, String> {
+        let toks = self.toks;
+        match toks.get(self.pos) {
+            Some(FilterTok::Atom(a)) => {
+                let present = atom_present(a, self.labels);
+                self.pos += 1;
+                Ok(present)
+            }
+            Some(FilterTok::LParen) => {
+                self.pos += 1;
+                let v = self.eval_or()?;
+                if matches!(toks.get(self.pos), Some(FilterTok::RParen)) {
+                    self.pos += 1;
+                    Ok(v)
+                } else {
+                    Err("expected `)`".to_string())
+                }
+            }
+            Some(t) => Err(format!("unexpected token `{t:?}`")),
+            None => Err("unexpected end of filter".to_string()),
+        }
+    }
+}
+
+/// Evaluate the boolean grammar over `labels`.
+fn eval_bool_filter(filter: &str, labels: &[&str]) -> Result<bool, String> {
+    let toks = tokenize_filter(filter)?;
+    if toks.is_empty() {
+        return Ok(true);
+    }
+    let mut parser = FilterParser {
+        toks: &toks,
+        pos: 0,
+        labels,
+    };
+    let v = parser.eval_or()?;
+    if parser.pos != toks.len() {
+        return Err("trailing tokens after expression".to_string());
+    }
+    Ok(v)
+}
+
+/// Evaluate a label filter against a spec's labels. `None`/empty → matches all.
+///
+/// Routes to the boolean grammar (`&&`, `||`, `!`, parentheses, glob atoms) when
+/// any boolean operator or paren is present, otherwise to the legacy `,` (OR) /
+/// `+` (AND) syntax (also glob-aware). Invalid boolean expressions match nothing
+/// and print a warning.
+pub(crate) fn labels_match(labels: &[&str], filter: Option<&str>) -> bool {
+    let filter = match filter {
+        Some(f) if !f.trim().is_empty() => f.trim(),
+        _ => return true,
+    };
+
+    let is_bool = filter.contains("&&")
+        || filter.contains("||")
+        || filter.contains('(')
+        || filter.contains(')');
+
+    if is_bool {
+        match eval_bool_filter(filter, labels) {
+            Ok(matched) => matched,
+            Err(e) => {
+                eprintln!("rsspec: invalid label filter '{filter}': {e}");
+                false
+            }
+        }
+    } else {
+        labels_match_filter(labels, filter)
+    }
 }
 
 /// Retry a test function up to `retries` additional times on failure.
@@ -583,6 +777,81 @@ mod tests {
         assert!(labels_match_filter(&["integration"], "integration,smoke"));
         assert!(labels_match_filter(&["smoke"], "integration,smoke"));
         assert!(!labels_match_filter(&["fast"], "integration,smoke"));
+    }
+
+    // ---- glob_match ----
+    #[test]
+    fn glob_exact_and_wildcard() {
+        assert!(glob_match("integration", "integration"));
+        assert!(!glob_match("integration", "unit"));
+        assert!(glob_match("lang:*", "lang:plain-call"));
+        assert!(!glob_match("lang:*", "pg:edge-calls"));
+        assert!(glob_match("*:edge-calls", "pg:edge-calls"));
+        assert!(glob_match("pg:edge-*", "pg:edge-calls"));
+        assert!(glob_match("*", "anything"));
+        assert!(glob_match("a*b*c", "axxbyyc"));
+        assert!(glob_match("a*b", "ab")); // star matches empty
+        assert!(!glob_match("*foo", "barfoox"));
+    }
+
+    // ---- labels_match: boolean grammar ----
+    #[test]
+    fn labels_bool_and_or_not() {
+        assert!(labels_match(&["a", "b"], Some("a && b")));
+        assert!(!labels_match(&["a"], Some("a && b")));
+        assert!(labels_match(&["a"], Some("a || b")));
+        assert!(!labels_match(&["c"], Some("a || b")));
+        assert!(labels_match(&["x"], Some("!a")));
+        assert!(!labels_match(&["a"], Some("!a")));
+    }
+
+    #[test]
+    fn labels_bool_precedence_and_parens() {
+        // && binds tighter than ||: "a || b && c" == "a || (b && c)"
+        assert!(labels_match(&["a"], Some("a || b && c")));
+        assert!(!labels_match(&["b"], Some("a || b && c"))); // b set, c unset
+                                                             // parens override precedence
+        assert!(labels_match(&["b", "c"], Some("(a || b) && c")));
+        assert!(!labels_match(&["b"], Some("(a || b) && c")));
+        // exclusion
+        assert!(!labels_match(&["a", "b"], Some("(a || x) && !b")));
+        assert!(labels_match(&["a", "x"], Some("(a || z) && !b")));
+    }
+
+    #[test]
+    fn labels_bool_with_glob() {
+        assert!(labels_match(&["lang:async"], Some("lang:* && !pg:slow")));
+        assert!(!labels_match(
+            &["lang:async", "pg:slow"],
+            Some("lang:* && !pg:slow")
+        ));
+        assert!(labels_match(
+            &["pg:edge-calls"],
+            Some("lang:* || pg:edge-*")
+        ));
+    }
+
+    #[test]
+    fn labels_none_or_empty_matches_all() {
+        assert!(labels_match(&["a"], None));
+        assert!(labels_match(&["a"], Some("")));
+        assert!(labels_match(&["a"], Some("   ")));
+    }
+
+    #[test]
+    fn labels_legacy_syntax_still_works_via_dispatcher() {
+        assert!(labels_match(&["a", "b"], Some("a+b"))); // legacy AND
+        assert!(!labels_match(&["a"], Some("a+b")));
+        assert!(labels_match(&["a"], Some("a,b"))); // legacy OR
+        assert!(!labels_match(&["slow"], Some("!slow"))); // legacy exclude
+        assert!(labels_match(&["lang:async"], Some("lang:*"))); // glob atom in legacy path
+    }
+
+    #[test]
+    fn labels_invalid_bool_filter_excludes() {
+        // Malformed expressions must not match (a warning is printed).
+        assert!(!labels_match(&["a"], Some("a &&")));
+        assert!(!labels_match(&["a"], Some("(a")));
     }
 
     #[test]

@@ -712,6 +712,7 @@ pub fn run(body: impl FnOnce(Context)) {
             list: false,
             include_ignored: false,
             parallelism: 1,
+            label_filter: None,
         }
     } else {
         RunConfig::from_args()
@@ -762,6 +763,7 @@ pub fn run_inline(body: impl FnOnce(Context)) {
         list: false,
         include_ignored: false,
         parallelism: 1,
+        label_filter: None,
     };
     let suite = Suite::new("", nodes);
     let result = runner::run_suites(vec![suite], &config);

@@ -10,7 +10,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dev-dependencies]
-rsspec = "0.5"
+rsspec = "0.6"
 
 [[test]]
 name = "my_tests"
@@ -284,7 +284,7 @@ Enable the `tokio` feature for async test support:
 
 ```toml
 [dev-dependencies]
-rsspec = { version = "0.4", features = ["tokio"] }
+rsspec = { version = "0.6", features = ["tokio"] }
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -464,10 +464,31 @@ ctx.it("requires a database", || {
 
 | Variable | Description |
 | --- | --- |
-| `RSSPEC_LABEL_FILTER` | Filter tests by labels. `integration` = match label, `!slow` = exclude, `a,b` = OR, `a+b` = AND |
+| `RSSPEC_LABEL_FILTER` | Filter tests by labels — boolean grammar + globs (see [Label filtering](#label-filtering)). Overridden by `--label-filter`. |
 | `RSSPEC_FAIL_ON_FOCUS` | Set to `1` or `true` to fail when focused tests exist (CI safety) |
 | `RSSPEC_PARALLEL` | Worker count for the `parallel` feature: a positive integer or `auto`. Overridden by `--parallel`. Ignored (warns) without the feature |
 | `NO_COLOR` | Disable colored output |
+
+## Label filtering
+
+Attach labels with `.labels(&[...])` on a spec, or `ctx.labels(&[...])` on a
+`describe` (inherited by all child specs). Filter at run time with the
+`--label-filter` CLI flag or the `RSSPEC_LABEL_FILTER` env var (the flag wins):
+
+```bash
+cargo test --test seam -- --label-filter "lang:* && !pg:slow"
+RSSPEC_LABEL_FILTER="integration || smoke" cargo test
+```
+
+The filter is a boolean expression:
+
+- `&&`, `||`, `!`, and parentheses — `(lang:async || lang:plain) && !pg:slow`
+- glob atoms with `*` — `lang:*` matches `lang:async` and `lang:plain-call`
+- precedence: `!` > `&&` > `||`
+
+The legacy syntax still works: `a,b` (OR), `a+b` (AND), `!x` (exclude). A spec's
+effective labels are its own plus every ancestor `describe`'s. An invalid
+expression matches nothing and prints a warning.
 
 ## Shared State Patterns
 
@@ -585,7 +606,7 @@ Enable the `googletest` feature for composable matchers:
 
 ```toml
 [dev-dependencies]
-rsspec = { version = "0.4", features = ["googletest"] }
+rsspec = { version = "0.6", features = ["googletest"] }
 ```
 
 ```rust

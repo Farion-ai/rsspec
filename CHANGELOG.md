@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-06-03
+
+### Added
+
+- **Opt-in parallel execution (`parallel` feature).** Distinct top-level
+  `describe` / `it` / `ordered` subtrees run on a worker-thread pool via
+  `--parallel[=N]` (or `RSSPEC_PARALLEL`). `before_all` still runs once per
+  subtree and fixtures stay isolated; output is buffered per subtree and flushed
+  in tree order, so it stays deterministic. The feature adds a `Send` bound to
+  every test/hook closure; with it off the API is byte-for-byte unchanged.
+
+- **Boolean label-filter grammar with globs.** `RSSPEC_LABEL_FILTER` and the new
+  `--label-filter` CLI flag accept `&&`, `||`, `!`, and parentheses, plus glob
+  atoms (`lang:*`). Example: `--label-filter "lang:* && !pg:slow"`. The legacy
+  `,` (OR) / `+` (AND) / `!` (exclude) syntax still works; the CLI flag overrides
+  the env var.
+
 ## [0.5.0] — 2026-03-30
 
 ### Added

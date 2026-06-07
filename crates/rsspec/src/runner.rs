@@ -341,6 +341,9 @@ impl Sink<'_> {
 struct Ctx<'s> {
     config: &'s RunConfig,
     focus_mode: bool,
+    /// Effective label filter (CLI `--label-filter` or `RSSPEC_LABEL_FILTER`),
+    /// resolved once per run so the tree walk doesn't re-read the environment.
+    label_filter: Option<String>,
     sink: Sink<'s>,
 }
 
@@ -354,6 +357,9 @@ pub(crate) struct RunConfig {
     pub include_ignored: bool,
     /// Number of worker threads for top-level parallelism. `1` = sequential.
     pub parallelism: usize,
+    /// Label-filter expression from `--label-filter` (CLI). Overrides the
+    /// `RSSPEC_LABEL_FILTER` env var when present.
+    pub label_filter: Option<String>,
 }
 
 /// Args that are exclusively used by libtest (cargo test's built-in harness).
@@ -391,10 +397,17 @@ impl RunConfig {
     /// `run()` auto-detects the context and skips arg parsing.
     pub(crate) fn from_args() -> Self {
         let args: Vec<String> = std::env::args().collect();
+        Self::from_argv(&args)
+    }
+
+    /// Parse a config from an argv slice (`args[0]` is the program name). Split
+    /// out from [`from_args`] so the argument handling can be unit-tested.
+    pub(crate) fn from_argv(args: &[String]) -> Self {
         let mut filter = None;
         let mut list = false;
         let mut include_ignored = false;
         let mut parallel_spec: Option<String> = None;
+        let mut label_filter = None;
 
         let mut i = 1;
         while i < args.len() {
@@ -417,6 +430,15 @@ impl RunConfig {
                 a if a.starts_with("--parallel=") => {
                     parallel_spec = Some(a["--parallel=".len()..].to_string());
                 }
+                "--label-filter" => {
+                    if let Some(v) = args.get(i + 1) {
+                        label_filter = Some(v.clone());
+                        i += 1;
+                    }
+                }
+                a if a.starts_with("--label-filter=") => {
+                    label_filter = Some(a["--label-filter=".len()..].to_string());
+                }
                 arg if !arg.starts_with('-') => {
                     filter = Some(arg.to_string());
                 }
@@ -430,7 +452,21 @@ impl RunConfig {
             list,
             include_ignored,
             parallelism: resolve_parallelism(parallel_spec.as_deref()),
+            label_filter,
         }
+    }
+
+    /// The effective label filter: `--label-filter` (CLI) when non-empty,
+    /// otherwise the `RSSPEC_LABEL_FILTER` env var. `None` when neither is set.
+    pub(crate) fn resolve_label_filter(&self) -> Option<String> {
+        if let Some(f) = &self.label_filter {
+            if !f.trim().is_empty() {
+                return Some(f.clone());
+            }
+        }
+        std::env::var("RSSPEC_LABEL_FILTER")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
     }
 }
 
@@ -507,6 +543,7 @@ fn run_tree(nodes: &[TestNode], config: &RunConfig) -> RunResult {
     let mut ctx = Ctx {
         config,
         focus_mode,
+        label_filter: config.resolve_label_filter(),
         sink: Sink::Stdout,
     };
     ctx.sink.blank();
@@ -568,6 +605,7 @@ fn run_suites_sequential(
     let mut ctx = Ctx {
         config,
         focus_mode,
+        label_filter: config.resolve_label_filter(),
         sink: Sink::Stdout,
     };
     ctx.sink.blank();
@@ -771,6 +809,7 @@ fn render_unit(node: &TestNode, focus_mode: bool, config: &RunConfig) -> (String
         let mut ctx = Ctx {
             config,
             focus_mode,
+            label_filter: config.resolve_label_filter(),
             sink: Sink::Buffer(&mut buf),
         };
         let mut hooks = HookChain::default();
@@ -842,7 +881,7 @@ fn has_runnable_tests<'a>(
                     .copied()
                     .chain(labels.iter().map(|s| s.as_str()))
                     .collect();
-                if !crate::check_labels(&all_labels) {
+                if !crate::labels_match(&all_labels, ctx.label_filter.as_deref()) {
                     continue;
                 }
                 return true;
@@ -865,7 +904,7 @@ fn has_runnable_tests<'a>(
                     .copied()
                     .chain(labels.iter().map(|s| s.as_str()))
                     .collect();
-                if !crate::check_labels(&all_labels) {
+                if !crate::labels_match(&all_labels, ctx.label_filter.as_deref()) {
                     continue;
                 }
                 return true;
@@ -1108,7 +1147,7 @@ fn run_it_node<'a>(
         .copied()
         .chain(labels.iter().map(|s| s.as_str()))
         .collect();
-    if !crate::check_labels(&all_labels) {
+    if !crate::labels_match(&all_labels, ctx.label_filter.as_deref()) {
         return;
     }
 
@@ -1268,7 +1307,7 @@ fn run_ordered_node<'a>(
         .copied()
         .chain(labels.iter().map(|s| s.as_str()))
         .collect();
-    if !crate::check_labels(&all_labels) {
+    if !crate::labels_match(&all_labels, ctx.label_filter.as_deref()) {
         return;
     }
 
@@ -1550,6 +1589,7 @@ mod tests {
             list: false,
             include_ignored: false,
             parallelism: 1,
+            label_filter: None,
         };
         let result = run_tree(&nodes, &config);
 
@@ -1574,6 +1614,7 @@ mod tests {
             list: false,
             include_ignored: false,
             parallelism: 1,
+            label_filter: None,
         };
         let result = run_tree(&nodes, &config);
 
@@ -1604,6 +1645,7 @@ mod tests {
             list: false,
             include_ignored: false,
             parallelism: 1,
+            label_filter: None,
         };
         let result = run_tree(&nodes, &config);
 
@@ -1630,6 +1672,7 @@ mod tests {
             list: false,
             include_ignored: false,
             parallelism: 1,
+            label_filter: None,
         };
         let result = run_tree(&nodes, &config);
 
@@ -1659,6 +1702,7 @@ mod tests {
             list: false,
             include_ignored: false,
             parallelism: 1,
+            label_filter: None,
         };
         let result = run_tree(&nodes, &config);
 
@@ -1690,6 +1734,7 @@ mod tests {
             list: false,
             include_ignored: false,
             parallelism: 1,
+            label_filter: None,
         };
         let result = run_tree(&nodes, &config);
 
@@ -1717,6 +1762,7 @@ mod tests {
             list: false,
             include_ignored: false,
             parallelism: 1,
+            label_filter: None,
         };
         let result = run_tree(&nodes, &config);
 
@@ -1757,6 +1803,7 @@ mod tests {
             list: false,
             include_ignored: false,
             parallelism: 1,
+            label_filter: None,
         };
         let result = run_tree(&[outer], &config);
 
@@ -1771,6 +1818,49 @@ mod tests {
     #[test]
     fn mixed_and_or_filter_is_rejected() {
         assert!(!crate::labels_match_filter(&["a", "b"], "a+b,c"));
+    }
+
+    // Wiring: a `label_filter` on the config actually filters specs at run time
+    // (config.resolve_label_filter() -> Ctx -> labels_match in run_it_node),
+    // including the boolean grammar and glob atoms.
+    #[test]
+    fn label_filter_config_filters_specs_at_runtime() {
+        fn it_labeled(name: &'static str, labels: &[&str]) -> TestNode {
+            TestNode::It {
+                name: name.to_string(),
+                focused: false,
+                pending: false,
+                labels: labels.iter().map(|s| (*s).to_string()).collect(),
+                retries: None,
+                timeout_ms: None,
+                must_pass_repeatedly: None,
+                test_fn: Box::new(|| {}),
+            }
+        }
+
+        let nodes = vec![TestNode::describe(
+            "suite",
+            vec![
+                it_labeled("async one", &["lang:async"]),
+                it_labeled("plain one", &["lang:plain-call"]),
+                it_labeled("slow one", &["lang:async", "pg:slow"]),
+                it_labeled("unrelated", &["pg:edge-calls"]),
+            ],
+        )];
+
+        let config = RunConfig {
+            filter: None,
+            list: false,
+            include_ignored: false,
+            parallelism: 1,
+            label_filter: Some("lang:* && !pg:slow".to_string()),
+        };
+        let result = run_tree(&nodes, &config);
+
+        // "async one" and "plain one" match (lang:*, no pg:slow); "slow one" is
+        // excluded by !pg:slow; "unrelated" has no lang:* label.
+        assert_eq!(result.passed, 2, "only the two lang:* non-slow specs run");
+        assert_eq!(result.failed, 0);
     }
 
     #[test]
@@ -1798,6 +1888,7 @@ mod tests {
             list: false,
             include_ignored: false,
             parallelism: 1,
+            label_filter: None,
         };
         let result = run_tree(&nodes, &config);
 
@@ -1829,6 +1920,7 @@ mod tests {
             list: false,
             include_ignored: false,
             parallelism: 1,
+            label_filter: None,
         };
         let result = run_tree(&nodes, &config);
 
@@ -1841,6 +1933,23 @@ mod tests {
 
     fn args(strs: &[&str]) -> Vec<String> {
         strs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn from_argv_parses_label_filter() {
+        let c = RunConfig::from_argv(&args(&["prog", "--label-filter", "lang:* && !pg:slow"]));
+        assert_eq!(c.label_filter.as_deref(), Some("lang:* && !pg:slow"));
+
+        let c2 = RunConfig::from_argv(&args(&["prog", "--label-filter=lang:async"]));
+        assert_eq!(c2.label_filter.as_deref(), Some("lang:async"));
+
+        let c3 = RunConfig::from_argv(&args(&["prog"]));
+        assert_eq!(c3.label_filter, None);
+
+        // The value must not be swallowed as the positional path filter.
+        let c4 = RunConfig::from_argv(&args(&["prog", "--label-filter", "lang:x", "myname"]));
+        assert_eq!(c4.label_filter.as_deref(), Some("lang:x"));
+        assert_eq!(c4.filter.as_deref(), Some("myname"));
     }
 
     #[test]
@@ -1887,6 +1996,7 @@ mod tests {
             list: false,
             include_ignored: false,
             parallelism: 1,
+            label_filter: None,
         };
         let result = run_tree(&nodes, &config);
         assert_eq!(result.passed, 1);
@@ -1922,6 +2032,7 @@ mod tests {
                 list: false,
                 include_ignored: false,
                 parallelism,
+                label_filter: None,
             }
         }
 
