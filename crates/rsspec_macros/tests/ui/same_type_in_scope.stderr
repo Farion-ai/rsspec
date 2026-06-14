@@ -1,4 +1,4 @@
-error: rsspec: a fixture of type `String` (`first`) is already in scope; implicit reads can't disambiguate two fixtures of the same type — give this one a distinct type (a newtype wrapper works)
+error: rsspec: a fixture of type `String` (`first`) is already in scope; implicit reads can't disambiguate two fixtures of the same type — give this one a distinct type (a newtype works)
   --> tests/ui/same_type_in_scope.rs:11:33
    |
 11 |             before_all!(second: String = String::from("y"));

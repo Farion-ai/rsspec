@@ -50,6 +50,35 @@ pub fn xdescribe(input: TokenStream) -> TokenStream {
     container_entry(input, false, true)
 }
 
+// `context!`/`when!` (and their `f`/`x` variants) are interchangeable container
+// entry points — aliases for `describe!`/`fdescribe!`/`xdescribe!`. Nested inside
+// a `describe!` they are parsed as tokens (see `lower_stmt`); these handle the
+// top-level invocations.
+#[proc_macro]
+pub fn context(input: TokenStream) -> TokenStream {
+    container_entry(input, false, false)
+}
+#[proc_macro]
+pub fn fcontext(input: TokenStream) -> TokenStream {
+    container_entry(input, true, false)
+}
+#[proc_macro]
+pub fn xcontext(input: TokenStream) -> TokenStream {
+    container_entry(input, false, true)
+}
+#[proc_macro]
+pub fn when(input: TokenStream) -> TokenStream {
+    container_entry(input, false, false)
+}
+#[proc_macro]
+pub fn fwhen(input: TokenStream) -> TokenStream {
+    container_entry(input, true, false)
+}
+#[proc_macro]
+pub fn xwhen(input: TokenStream) -> TokenStream {
+    container_entry(input, false, true)
+}
+
 fn container_entry(input: TokenStream, focused: bool, pending: bool) -> TokenStream {
     let DescribeInput { name, body } = parse_macro_input!(input as DescribeInput);
     match lower_block(&name, &body, focused, pending, &[]) {
@@ -126,20 +155,69 @@ fn lower_nested(
 
 // ---- before_all! / before_each! --------------------------------------------
 
-struct BeforeArgs {
-    name: Ident,
-    ty: Type,
-    expr: Expr,
+/// A `|param: &Ty|` read head, shared by the explicit before/hook forms.
+struct ReadHead {
+    param: Ident,
+    in_ty: Type,
+}
+
+fn parse_read_head(input: ParseStream) -> syn::Result<ReadHead> {
+    input.parse::<Token![|]>()?;
+    let param = input.parse()?;
+    input.parse::<Token![:]>()?;
+    input.parse::<Token![&]>()?;
+    let in_ty = input.parse()?;
+    input.parse::<Token![|]>()?;
+    Ok(ReadHead { param, in_ty })
+}
+
+enum BeforeArgs {
+    /// `name: T = expr` — implicit declaration (the primary form).
+    Named { name: Ident, ty: Type, expr: Expr },
+    /// `|outer: &U| -> T { … }` — explicit read of an enclosing fixture, returns T.
+    ReadReturn {
+        param: Ident,
+        in_ty: Type,
+        out_ty: Type,
+        body: Block,
+    },
+    /// `|outer: &U| { … }` — explicit read for side effects, returns ().
+    ReadVoid {
+        param: Ident,
+        in_ty: Type,
+        body: Block,
+    },
 }
 
 impl Parse for BeforeArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let name = input.parse()?;
-        input.parse::<Token![:]>()?;
-        let ty = input.parse()?;
-        input.parse::<Token![=]>()?;
-        let expr = input.parse()?;
-        Ok(Self { name, ty, expr })
+        if input.peek(Token![|]) {
+            let ReadHead { param, in_ty } = parse_read_head(input)?;
+            if input.peek(Token![->]) {
+                input.parse::<Token![->]>()?;
+                let out_ty = input.parse()?;
+                let body = input.parse()?;
+                Ok(BeforeArgs::ReadReturn {
+                    param,
+                    in_ty,
+                    out_ty,
+                    body,
+                })
+            } else {
+                Ok(BeforeArgs::ReadVoid {
+                    param,
+                    in_ty,
+                    body: input.parse()?,
+                })
+            }
+        } else {
+            let name = input.parse()?;
+            input.parse::<Token![:]>()?;
+            let ty = input.parse()?;
+            input.parse::<Token![=]>()?;
+            let expr = input.parse()?;
+            Ok(BeforeArgs::Named { name, ty, expr })
+        }
     }
 }
 
@@ -153,46 +231,99 @@ fn lower_before(
     fixtures: &mut Vec<Fixture>,
     scope: bool,
 ) -> syn::Result<TokenStream2> {
-    let BeforeArgs { name, ty, expr } = parse2(mac.tokens.clone())?;
-    // Two in-scope fixtures of the same type can't be told apart by an implicit
-    // read: both `with_fixture::<T>` calls resolve to the innermost value. Reject
-    // the collision at expansion rather than silently picking last-wins.
-    let key = type_key(&ty);
-    if let Some(prev) = fixtures.iter().find(|f| type_key(&f.ty) == key) {
-        let prev = &prev.name;
-        return Err(syn::Error::new_spanned(
-            &ty,
-            format!(
-                "rsspec: a fixture of type `{key}` (`{prev}`) is already in scope; \
-                 implicit reads can't disambiguate two fixtures of the same type — \
-                 give this one a distinct type (a newtype wrapper works)"
-            ),
-        ));
-    }
-    // The expr may read earlier fixtures by bare name — inject those reads.
-    let body = wrap_reads(&fixtures[..], quote! { #expr });
     let reg = if scope {
         quote!(before_all)
     } else {
         quote!(before_each)
     };
-    let out = quote! {
-        ::rsspec::__rt::#reg(move || -> #ty { #body });
-    };
-    fixtures.push(Fixture { name, ty });
-    Ok(out)
+    match parse2::<BeforeArgs>(mac.tokens.clone())? {
+        BeforeArgs::Named { name, ty, expr } => {
+            // Two in-scope fixtures of the same type can't be told apart by an
+            // implicit read: both `with_fixture::<T>` calls resolve to the
+            // innermost value. Reject the collision rather than silently last-wins.
+            let key = type_key(&ty);
+            if let Some(prev) = fixtures.iter().find(|f| type_key(&f.ty) == key) {
+                let prev = &prev.name;
+                return Err(syn::Error::new_spanned(
+                    &ty,
+                    format!(
+                        "rsspec: a fixture of type `{key}` (`{prev}`) is already in \
+                         scope; implicit reads can't disambiguate two fixtures of the \
+                         same type — give this one a distinct type (a newtype works)"
+                    ),
+                ));
+            }
+            // The expr may read earlier fixtures by bare name — inject those reads.
+            let body = wrap_reads(&fixtures[..], quote! { #expr });
+            let out = quote! {
+                ::rsspec::__rt::#reg(move || -> #ty { #body });
+            };
+            fixtures.push(Fixture { name, ty });
+            Ok(out)
+        }
+        // Explicit read forms pass straight through to the runtime's hook
+        // dispatch: the reference is named, so there's no implicit injection and
+        // no tracked fixture (downstream reads it explicitly too).
+        BeforeArgs::ReadReturn {
+            param,
+            in_ty,
+            out_ty,
+            body,
+        } => Ok(quote! {
+            ::rsspec::__rt::#reg(move |#param: &#in_ty| -> #out_ty #body);
+        }),
+        BeforeArgs::ReadVoid {
+            param,
+            in_ty,
+            body,
+        } => Ok(quote! {
+            ::rsspec::__rt::#reg(move |#param: &#in_ty| #body);
+        }),
+    }
 }
 
 // ---- after_each! / after_all! / just_before_each! --------------------------
 
+enum HookArgs {
+    /// `|outer: &T| { … }` — explicit read; passes straight through.
+    Read {
+        param: Ident,
+        ty: Box<Type>,
+        body: Block,
+    },
+    /// `{ … }` — implicit fixtures resolved inside via injected reads.
+    Block(Block),
+}
+
+impl Parse for HookArgs {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        if input.peek(Token![|]) {
+            let ReadHead { param, in_ty } = parse_read_head(input)?;
+            Ok(HookArgs::Read {
+                param,
+                ty: Box::new(in_ty),
+                body: input.parse()?,
+            })
+        } else {
+            Ok(HookArgs::Block(input.parse()?))
+        }
+    }
+}
+
 fn lower_hook(mac: &Macro, fixtures: &[Fixture], ctor: &str) -> syn::Result<TokenStream2> {
-    let body: Block = parse2(mac.tokens.clone())?;
     let ctor = Ident::new(ctor, Span::call_site());
-    let stmts = &body.stmts;
-    let wrapped = wrap_reads(fixtures, quote! { #(#stmts)* });
-    Ok(quote! {
-        ::rsspec::__rt::#ctor(move || { #wrapped });
-    })
+    match parse2::<HookArgs>(mac.tokens.clone())? {
+        HookArgs::Read { param, ty, body } => Ok(quote! {
+            ::rsspec::__rt::#ctor(move |#param: &#ty| #body);
+        }),
+        HookArgs::Block(body) => {
+            let stmts = &body.stmts;
+            let wrapped = wrap_reads(fixtures, quote! { #(#stmts)* });
+            Ok(quote! {
+                ::rsspec::__rt::#ctor(move || { #wrapped });
+            })
+        }
+    }
 }
 
 // ---- it! / fit! / xit! + decorators ----------------------------------------
