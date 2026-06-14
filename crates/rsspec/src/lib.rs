@@ -614,13 +614,28 @@ pub(crate) fn push_scope_setup_layer() {
 
 /// Store a per-scope value into the current (innermost) scope layer.
 /// Called by returning `before_all` hooks.
+///
+/// Panics if a value of the same type `T` is already registered in this scope:
+/// two same-type `before_all` fixtures in one scope can't be told apart by an
+/// implicit read (both resolve to this `TypeId`), so the second would silently
+/// shadow the first. The macro layer rejects the syntactic case at compile time;
+/// this `TypeId` check catches what it can't see — the same type written two ways
+/// (`Vec<u8>` vs `std::vec::Vec<u8>`, a type alias). Distinct scopes still shadow.
 pub(crate) fn store_scope_setup_value<T: 'static>(val: T) {
     SCOPE_SETUP_STACK.with(|cell| {
         let mut stack = cell.borrow_mut();
         let top = stack
             .last_mut()
             .expect("rsspec: store_scope_setup_value called with no active scope — internal error");
-        top.insert(TypeId::of::<T>(), Box::new(val));
+        let tid = TypeId::of::<T>();
+        if top.contains_key(&tid) {
+            panic!(
+                "rsspec: two before_all fixtures of type `{}` in one scope — implicit \
+                 reads can't disambiguate them; give one a distinct type (a newtype works)",
+                std::any::type_name::<T>()
+            );
+        }
+        top.insert(tid, Box::new(val));
     });
 }
 
