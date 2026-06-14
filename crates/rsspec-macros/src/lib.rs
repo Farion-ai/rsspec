@@ -2,14 +2,15 @@
 //!
 //! `describe!` parses its whole block. `before_all!(name: T = expr)` declares a
 //! named, typed fixture (stored by raw type); `it!("…", { … })` bodies — and
-//! nested `context!` blocks — reference those fixtures by bare name, with the
-//! `&T` read injected by this macro. The parameter is implicit; the return type
-//! is explicit. Nested containers inherit the enclosing scope's fixtures.
+//! nested `context!` blocks and `after_*!`/`just_before_each!` hooks — reference
+//! those fixtures by bare name, with the `&T` read injected by this macro. The
+//! parameter is implicit; the return type is explicit.
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
+use syn::punctuated::Punctuated;
 use syn::{parse2, parse_macro_input, Block, Expr, Ident, LitStr, Macro, Stmt, Token, Type};
 
 /// A fixture in scope: its user-written name (carrying its span) and declared type.
@@ -100,6 +101,9 @@ fn lower_stmt(stmt: &Stmt, fixtures: &mut Vec<Fixture>) -> syn::Result<TokenStre
         "it" | "specify" => lower_it(mac, &fixtures[..], "it"),
         "fit" | "fspecify" => lower_it(mac, &fixtures[..], "fit"),
         "xit" | "xspecify" => lower_it(mac, &fixtures[..], "xit"),
+        "after_each" => lower_hook(mac, &fixtures[..], "after_each"),
+        "after_all" => lower_hook(mac, &fixtures[..], "after_all"),
+        "just_before_each" => lower_hook(mac, &fixtures[..], "just_before_each"),
         "describe" | "context" | "when" => lower_nested(mac, &fixtures[..], false, false),
         "fdescribe" | "fcontext" | "fwhen" => lower_nested(mac, &fixtures[..], true, false),
         "xdescribe" | "xcontext" | "xwhen" => lower_nested(mac, &fixtures[..], false, true),
@@ -159,29 +163,97 @@ fn lower_before(
     Ok(out)
 }
 
-// ---- it! / fit! / xit! ------------------------------------------------------
+// ---- after_each! / after_all! / just_before_each! --------------------------
+
+fn lower_hook(mac: &Macro, fixtures: &[Fixture], ctor: &str) -> syn::Result<TokenStream2> {
+    let body: Block = parse2(mac.tokens.clone())?;
+    let ctor = Ident::new(ctor, Span::call_site());
+    let stmts = &body.stmts;
+    let wrapped = wrap_reads(fixtures, quote! { #(#stmts)* });
+    Ok(quote! {
+        ::rsspec::__rt::#ctor(move || { #wrapped });
+    })
+}
+
+// ---- it! / fit! / xit! + decorators ----------------------------------------
+
+enum Decorator {
+    Tags(Vec<Expr>),
+    Retries(Expr),
+    Timeout(Expr),
+    MustPass(Expr),
+}
 
 struct ItArgs {
     name: LitStr,
     body: Block,
+    decorators: Vec<Decorator>,
 }
 
 impl Parse for ItArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let name = input.parse()?;
         input.parse::<Token![,]>()?;
-        let body = input.parse()?;
-        Ok(Self { name, body })
+        let body: Block = input.parse()?;
+        let mut decorators = Vec::new();
+        while input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+            if input.is_empty() {
+                break; // trailing comma
+            }
+            let key: Ident = input.parse()?;
+            input.parse::<Token![=]>()?;
+            let dec = match key.to_string().as_str() {
+                "tags" => {
+                    let content;
+                    syn::bracketed!(content in input);
+                    let items: Punctuated<Expr, Token![,]> =
+                        content.parse_terminated(Expr::parse, Token![,])?;
+                    Decorator::Tags(items.into_iter().collect())
+                }
+                "retries" => Decorator::Retries(input.parse()?),
+                "timeout" => Decorator::Timeout(input.parse()?),
+                "must_pass_repeatedly" => Decorator::MustPass(input.parse()?),
+                other => {
+                    return Err(syn::Error::new_spanned(
+                        &key,
+                        format!(
+                            "rsspec: unknown decorator `{other}` \
+                             (expected tags/retries/timeout/must_pass_repeatedly)"
+                        ),
+                    ))
+                }
+            };
+            decorators.push(dec);
+        }
+        Ok(Self {
+            name,
+            body,
+            decorators,
+        })
     }
 }
 
 fn lower_it(mac: &Macro, fixtures: &[Fixture], ctor: &str) -> syn::Result<TokenStream2> {
-    let ItArgs { name, body } = parse2(mac.tokens.clone())?;
+    let ItArgs {
+        name,
+        body,
+        decorators,
+    } = parse2(mac.tokens.clone())?;
     let ctor = Ident::new(ctor, Span::call_site());
     let stmts = &body.stmts;
     let wrapped = wrap_reads(fixtures, quote! { #(#stmts)* });
+    let chain: TokenStream2 = decorators
+        .iter()
+        .map(|d| match d {
+            Decorator::Tags(items) => quote! { .labels(&[#(#items),*]) },
+            Decorator::Retries(n) => quote! { .retries(#n) },
+            Decorator::Timeout(ms) => quote! { .timeout(#ms) },
+            Decorator::MustPass(n) => quote! { .must_pass_repeatedly(#n) },
+        })
+        .collect();
     Ok(quote! {
-        ::rsspec::__rt::#ctor(#name, move || { #wrapped });
+        ::rsspec::__rt::#ctor(#name, move || { #wrapped })#chain;
     })
 }
 
