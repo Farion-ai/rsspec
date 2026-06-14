@@ -300,10 +300,12 @@ ctx.ordered_continue_on_failure("resilient workflow", |oct| {
 
 ## Macro layer (optional)
 
-A thin, opt-in `macro_rules!` layer trims the closure ceremony. The macros lower to the
-same builder calls as the closure API and interoperate with it inside the same `run` /
-`run_inline` body, so you can adopt them gradually and drop back to closures any time.
-Import with `use rsspec::*;` (or per name).
+A proc-macro layer (the `macros` feature, **on by default**) trims the closure ceremony —
+and gives a `before_all!`-declared fixture an *implicit* binding: declare it once with a
+name, then read it by that bare name in every later body. No per-`it` `|v: &T|`. The macros
+lower to the same builder calls as the closure API and interoperate with it inside the same
+`run` / `run_inline` body, so you can adopt them gradually and drop back to closures any
+time. Import with `use rsspec::*;` (or per name); opt out with `default-features = false`.
 
 ```rust
 use rsspec::*;
@@ -311,11 +313,12 @@ use rsspec::*;
 fn main() {
     rsspec::run(|_| {
         describe!("Calculator", {
-            before_all!(base: i32 = 10);              // fixture, stored once
+            before_all!(base: i32 = 10);              // declared once — named + typed
 
-            it!("adds", 2 + 3 == 5);                  // bare boolean — asserted
-            it!("uses the fixture", |base: &i32| assert_eq!(*base, 10));
-            it!("does setup work", {                  // block body
+            it!("uses the fixture", {                 // `base` is implicit, no |base: &i32|
+                assert_eq!(*base, 10);
+            });
+            it!("does setup work", {                  // ordinary block body
                 let v = vec![1, 2, 3];
                 assert_eq!(v.len(), 3);
             });
@@ -329,23 +332,24 @@ fn main() {
 ```
 
 **Specs** — `it!` / `specify!`, focused `fit!` / `fspecify!`, pending `xit!` /
-`xspecify!`. Body forms: `{ block }`, a bare `expr` (asserted, with the expression text
-shown on failure), `|v: &T|` (reads a `before_all` / `before_each` fixture), or
-`async { … }` (requires the `tokio` feature — one `it!` replaces the `async_*` methods).
-Trailing decorators in any order: `tags=[..]`, `retries=N`, `timeout=MS`,
-`must_pass_repeatedly=N`.
+`xspecify!`. Body forms: a `{ block }` (in-scope fixtures read implicitly by name), an
+explicit `|v: &T|` read (the runtime hands the reference in), or `async { … }` (requires
+the `tokio` feature — one `it!` replaces the `async_*` methods). Trailing decorators in any
+order: `tags=[..]`, `retries=N`, `timeout=MS`, `must_pass_repeatedly=N`.
 
 **Containers** — `describe!` / `context!` / `when!`, focused `fdescribe!` / `fcontext!` /
 `fwhen!`, pending `xdescribe!` / `xcontext!` / `xwhen!`.
 
-**Hooks** — `before_all!` / `before_each!` take a fixture form `before_all!(name: T =
-expr)` (stored for `|name: &T|` readers), a read-and-return form `before_all!(|env: &U|
+**Hooks** — `before_all!` / `before_each!` take the fixture form `before_all!(name: T =
+expr)` (read later by the bare `name`), a read-and-return form `before_all!(|env: &U|
 -> T { .. })` that reads an enclosing-scope fixture and stores its result, or a `{ block }`
 side-effect form. `after_each!` / `after_all!` / `just_before_each!` take a `{ block }` or a
 read form `after_all!(|env: &T| { .. })`.
 
-> **Note:** Reading a fixture still names its type at each `it` (`|resp: &T|`) — the
-> macros remove the structural scaffolding, not that annotation. Everything lowers to the
+> **Note:** A `before_all!(name: T = …)` fixture is read by its bare `name` in later bodies
+> — the read side never restates the type. The explicit `|v: &T|` form stays available when
+> you'd rather name the reference; two in-scope fixtures of the *same* type are a compile
+> error, since an implicit read can't tell them apart. Everything lowers to the
 > [closure API](#api-reference); the two styles are equivalent and mixable.
 
 ## Async Tests
