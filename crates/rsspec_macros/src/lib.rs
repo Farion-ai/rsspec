@@ -143,12 +143,32 @@ impl Parse for BeforeArgs {
     }
 }
 
+/// A syntactic key for a fixture type, used to detect same-type collisions.
+fn type_key(ty: &Type) -> String {
+    quote!(#ty).to_string()
+}
+
 fn lower_before(
     mac: &Macro,
     fixtures: &mut Vec<Fixture>,
     scope: bool,
 ) -> syn::Result<TokenStream2> {
     let BeforeArgs { name, ty, expr } = parse2(mac.tokens.clone())?;
+    // Two in-scope fixtures of the same type can't be told apart by an implicit
+    // read: both `with_fixture::<T>` calls resolve to the innermost value. Reject
+    // the collision at expansion rather than silently picking last-wins.
+    let key = type_key(&ty);
+    if let Some(prev) = fixtures.iter().find(|f| type_key(&f.ty) == key) {
+        let prev = &prev.name;
+        return Err(syn::Error::new_spanned(
+            &ty,
+            format!(
+                "rsspec: a fixture of type `{key}` (`{prev}`) is already in scope; \
+                 implicit reads can't disambiguate two fixtures of the same type — \
+                 give this one a distinct type (a newtype wrapper works)"
+            ),
+        ));
+    }
     // The expr may read earlier fixtures by bare name — inject those reads.
     let body = wrap_reads(&fixtures[..], quote! { #expr });
     let reg = if scope {
