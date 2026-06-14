@@ -10,7 +10,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dev-dependencies]
-rsspec = "0.6"
+rsspec = "0.7"
 
 [[test]]
 name = "my_tests"
@@ -358,7 +358,7 @@ Enable the `tokio` feature for async test support:
 
 ```toml
 [dev-dependencies]
-rsspec = { version = "0.6", features = ["tokio"] }
+rsspec = { version = "0.7", features = ["tokio"] }
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -457,7 +457,7 @@ threads:
 
 ```toml
 [dev-dependencies]
-rsspec = { version = "0.6", features = ["parallel"] }
+rsspec = { version = "0.7", features = ["parallel"] }
 ```
 
 ```bash
@@ -680,7 +680,7 @@ Enable the `googletest` feature for composable matchers:
 
 ```toml
 [dev-dependencies]
-rsspec = { version = "0.6", features = ["googletest"] }
+rsspec = { version = "0.7", features = ["googletest"] }
 ```
 
 ```rust

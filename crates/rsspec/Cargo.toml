@@ -22,7 +22,7 @@ tokio = ["dep:tokio"]
 parallel = []
 
 [dependencies]
-rsspec_macros = { version = "0.6.0", path = "../rsspec_macros", optional = true }
+rsspec_macros = { version = "0.7.0", path = "../rsspec_macros", optional = true }
 googletest = { version = "0.14", optional = true }
 tokio = { version = "1", features = ["rt"], optional = true }
 
@@ -59,4 +59,3 @@ required-features = ["macros"]
 [[test]]
 name = "seam_smoke"
 required-features = ["macros"]
-
