@@ -175,6 +175,17 @@ pub(crate) fn with_builder<R>(f: impl FnOnce(&mut SuiteBuilder) -> R) -> R {
     })
 }
 
+/// Push a named group onto the builder. Macro-layer backing for `describe!`,
+/// kept private so `SuiteBuilder` stays internal.
+pub(crate) fn push_group(name: &str, focused: bool, pending: bool) {
+    with_builder(|b| b.push_group(name.to_string(), focused, pending));
+}
+
+/// Pop the current group off the builder. Macro-layer backing for `describe!`.
+pub(crate) fn pop_group() {
+    with_builder(|b| b.pop_group());
+}
+
 // ============================================================================
 // Context — the user-facing handle
 // ============================================================================

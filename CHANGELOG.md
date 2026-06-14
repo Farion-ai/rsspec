@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Optional macro layer.** Opt-in `macro_rules!` sugar over the closure API:
+  `describe!`/`context!`/`when!` (+ `f`/`x` variants), `it!`/`specify!` (+ `fit!`/
+  `xit!`), and `before_all!`/`before_each!`/`after_each!`/`after_all!`/
+  `just_before_each!`. An `it!` body can be a block, a bare boolean (asserted, with
+  the source shown on failure), a `|v: &T|` fixture closure, or `async { … }`
+  (feature `tokio`) — collapsing the `async_*` method set into one name. Trailing
+  decorators `tags=[..], retries=N, timeout=MS, must_pass_repeatedly=N`. The macros
+  lower to the same builder calls as the closure API and interoperate with it, so
+  dropping back to closures is mechanical. No new dependency.
+
 ## [0.6.0] — 2026-06-03
 
 ### Added

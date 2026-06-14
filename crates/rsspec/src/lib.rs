@@ -30,11 +30,68 @@
 //!   `Send` bound to test/hook closures; see `--parallel` / `RSSPEC_PARALLEL`)
 
 mod context;
+mod macros;
 pub(crate) mod ordered;
 pub(crate) mod runner;
 pub(crate) mod table;
 
-pub use context::{run, run_inline, Context, ItBuilder};
+pub use context::{run, run_inline, Context, IntoTestBody, ItBuilder};
+
+/// Free-function backing for the optional macro layer (`describe!`, `it!`, …).
+///
+/// Not a stable API: these mirror [`Context`] methods but take no `ctx`, so the
+/// macros never thread a context token — nesting is handled by the same
+/// thread-local builder the closure API uses. Hidden from docs.
+#[doc(hidden)]
+pub mod __rt {
+    use crate::context::{self, Context};
+
+    /// Backing for `describe!` / `context!` / `fdescribe!` / `xdescribe!`.
+    pub fn describe(name: &str, focused: bool, pending: bool, body: impl FnOnce()) {
+        context::push_group(name, focused, pending);
+        body();
+        context::pop_group();
+    }
+
+    pub fn it<M>(name: &str, body: impl crate::IntoTestBody<M> + 'static) -> crate::ItBuilder {
+        Context.it(name, body)
+    }
+    pub fn fit<M>(name: &str, body: impl crate::IntoTestBody<M> + 'static) -> crate::ItBuilder {
+        Context.fit(name, body)
+    }
+    pub fn xit<M>(name: &str, body: impl crate::IntoTestBody<M> + 'static) -> crate::ItBuilder {
+        Context.xit(name, body)
+    }
+
+    pub fn before_each<T: 'static>(hook: impl Fn() -> T + crate::MaybeSend + 'static) {
+        Context.before_each(hook);
+    }
+    pub fn before_all<T: 'static>(hook: impl Fn() -> T + crate::MaybeSend + 'static) {
+        Context.before_all(hook);
+    }
+    pub fn after_each(hook: impl Fn() + crate::MaybeSend + 'static) {
+        Context.after_each(hook);
+    }
+    pub fn after_all(hook: impl Fn() + crate::MaybeSend + 'static) {
+        Context.after_all(hook);
+    }
+    pub fn just_before_each(hook: impl Fn() + crate::MaybeSend + 'static) {
+        Context.just_before_each(hook);
+    }
+    pub fn labels(labels: &[&str]) {
+        Context.labels(labels);
+    }
+
+    /// Wrap an `async { … }` spec/hook body into a `Fn()`. Backs the `it!` async arm.
+    #[cfg(feature = "tokio")]
+    pub fn async_test<F, Fut>(f: F) -> impl Fn() + 'static
+    where
+        F: Fn() -> Fut + crate::MaybeSend + 'static,
+        Fut: std::future::Future<Output = ()> + 'static,
+    {
+        crate::async_test(f)
+    }
+}
 
 /// Re-export of the [`googletest`] crate. Available with the `googletest` feature.
 #[cfg(feature = "googletest")]

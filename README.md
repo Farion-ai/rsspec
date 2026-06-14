@@ -278,6 +278,54 @@ ctx.ordered_continue_on_failure("resilient workflow", |oct| {
 });
 ```
 
+## Macro layer (optional)
+
+A thin, opt-in `macro_rules!` layer trims the closure ceremony. The macros lower to the
+same builder calls as the closure API and interoperate with it inside the same `run` /
+`run_inline` body, so you can adopt them gradually and drop back to closures any time.
+Import with `use rsspec::*;` (or per name).
+
+```rust
+use rsspec::*;
+
+fn main() {
+    rsspec::run(|_| {
+        describe!("Calculator", {
+            before_all!(base: i32 = 10);              // fixture, stored once
+
+            it!("adds", 2 + 3 == 5);                  // bare boolean — asserted
+            it!("uses the fixture", |base: &i32| assert_eq!(*base, 10));
+            it!("does setup work", {                  // block body
+                let v = vec![1, 2, 3];
+                assert_eq!(v.len(), 3);
+            });
+
+            context!("when slow", {
+                it!("is tagged and retried", { /* … */ }, tags = ["slow"], retries = 2);
+            });
+        });
+    });
+}
+```
+
+**Specs** — `it!` / `specify!`, focused `fit!` / `fspecify!`, pending `xit!` /
+`xspecify!`. Body forms: `{ block }`, a bare `expr` (asserted, with the expression text
+shown on failure), `|v: &T|` (reads a `before_all` / `before_each` fixture), or
+`async { … }` (requires the `tokio` feature — one `it!` replaces the `async_*` methods).
+Trailing decorators in any order: `tags=[..]`, `retries=N`, `timeout=MS`,
+`must_pass_repeatedly=N`.
+
+**Containers** — `describe!` / `context!` / `when!`, focused `fdescribe!` / `fcontext!` /
+`fwhen!`, pending `xdescribe!` / `xcontext!` / `xwhen!`.
+
+**Hooks** — `before_all!` / `before_each!` take a fixture form `before_all!(name: T =
+expr)` (stored for `|name: &T|` readers) or a `{ block }` side-effect form; `after_each!`
+/ `after_all!` / `just_before_each!` take a `{ block }`.
+
+> **Note:** Reading a fixture still names its type at each `it` (`|resp: &T|`) — the
+> macros remove the structural scaffolding, not that annotation. Everything lowers to the
+> [closure API](#api-reference); the two styles are equivalent and mixable.
+
 ## Async Tests
 
 Enable the `tokio` feature for async test support:
