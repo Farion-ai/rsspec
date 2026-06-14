@@ -3,10 +3,14 @@
 //! Each macro lowers to the same closure-runtime calls as the hand-written API,
 //! so these assert the OBSERVABLE behaviour: specs run, `before_all` fixtures
 //! flow into `it` bodies, hooks fire, `xit` skips, `fit` focuses, decorators
-//! apply, and the bool-assertion sugar actually asserts. `run_inline` panics on
+//! apply, and a failing assertion really fails the spec. `run_inline` panics on
 //! any spec failure, so a mis-lowered spec fails the enclosing `#[test]`.
+//!
+//! Only `describe!` is imported: `it!`/`before_all!`/`context!`/`fit!`/`xit!`/
+//! `after_all!` are parsed as tokens by the `describe!` proc-macro, never invoked
+//! standalone.
 
-use rsspec::{after_all, before_all, before_each, context, describe, fit, it, xit};
+use rsspec::describe;
 use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 
@@ -38,10 +42,9 @@ fn before_all_fixture_flows_into_it() {
     rsspec::run_inline(|_| {
         describe!("api", {
             before_all!(cfg: String = format!("shared-{}", 42));
-            it!("receives the fixture by &T", |cfg: &String| assert_eq!(
-                cfg,
-                "shared-42"
-            ));
+            it!("receives the fixture by &T", |cfg: &String| {
+                assert_eq!(cfg, "shared-42");
+            });
         });
     });
 }
@@ -60,7 +63,9 @@ fn before_all_macro_reads_parent_fixture() {
             before_all!(env: Env = Env { base: 10 });
             describe!("inner", {
                 before_all!(|env: &Env| -> Results { Results { v: env.base + 5 } });
-                it!("derives from the parent fixture", |r: &Results| assert_eq!(r.v, 15));
+                it!("derives from the parent fixture", |r: &Results| {
+                    assert_eq!(r.v, 15);
+                });
             });
         });
     });
@@ -146,13 +151,15 @@ fn fit_focuses_only_marked_spec() {
 }
 
 #[test]
-fn bool_sugar_passes_on_true_expression() {
+fn passing_assertion_runs_the_spec() {
     static RAN: AtomicU32 = AtomicU32::new(0);
     RAN.store(0, SeqCst);
 
     rsspec::run_inline(|_| {
         describe!("math", {
-            it!("two plus two is four", 2 + 2 == 4);
+            it!("two plus two is four", {
+                assert_eq!(2 + 2, 4);
+            });
             it!("ran marker", {
                 RAN.fetch_add(1, SeqCst);
             });
@@ -163,18 +170,20 @@ fn bool_sugar_passes_on_true_expression() {
 }
 
 #[test]
-fn bool_sugar_fails_on_false_expression() {
+fn failing_assertion_fails_the_spec() {
     let outcome = std::panic::catch_unwind(|| {
         rsspec::run_inline(|_| {
             describe!("math", {
-                it!("one is not two", 1 == 2);
+                it!("one is not two", {
+                    assert_eq!(1, 2);
+                });
             });
         });
     });
 
     assert!(
         outcome.is_err(),
-        "a false bool-sugar expression must fail the spec (the macro must really assert)"
+        "a failing assertion must fail the spec (the macro must really run the body)"
     );
 }
 
@@ -222,24 +231,27 @@ fn tags_decorator_lowers_to_labels() {
 }
 
 #[test]
-fn it_arm_dispatch_is_pinned() {
-    // Pins `__it_impl!` arm order. The block body's value is `()`; if the greedy
-    // `$cond:expr` arm ever shadowed the block arm, it would expand to
-    // `assert!(())` — a compile error. So this test is the canary for a silent
-    // dispatch regression (block vs. fixture vs. bool).
+fn it_body_forms_coexist() {
+    // The three `it!` body forms must dispatch unambiguously side by side in one
+    // describe: a block body that reads the fixture IMPLICITLY, an explicit
+    // `|v: &T|` closure read, and a plain assertion block. A regression would
+    // mis-parse one form as another.
     static BLOCK_RAN: AtomicU32 = AtomicU32::new(0);
     BLOCK_RAN.store(0, SeqCst);
 
     rsspec::run_inline(|_| {
         describe!("arm dispatch", {
             before_all!(n: u32 = 7);
-            it!("block arm runs statements", {
+            it!("block arm reads the fixture implicitly", {
                 let collected: Vec<u32> = (0..3).collect();
                 assert_eq!(collected.len(), 3);
+                assert_eq!(*n, 7);
                 BLOCK_RAN.fetch_add(1, SeqCst);
             });
-            it!("fixture arm reads &T", |n: &u32| assert_eq!(*n, 7));
-            it!("cond arm asserts a bool", 1 + 1 == 2);
+            it!("closure arm reads &T", |n: &u32| assert_eq!(*n, 7));
+            it!("assertion-block arm runs", {
+                assert!(1 + 1 == 2);
+            });
         });
     });
 

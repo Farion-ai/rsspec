@@ -30,12 +30,21 @@
 //!   `Send` bound to test/hook closures; see `--parallel` / `RSSPEC_PARALLEL`)
 
 mod context;
-mod macros;
 pub(crate) mod ordered;
 pub(crate) mod runner;
 pub(crate) mod table;
 
 pub use context::{run, run_inline, Context, IntoBeforeHook, IntoTestBody, ItBuilder};
+
+/// The optional macro layer — `describe!`/`context!`/`when!` (and their `f`/`x`
+/// variants) plus the `it!`/`before_all!`/`before_each!`/`after_*!` forms they
+/// parse. A proc-macro gives fixtures declared with `before_all!(name: T = …)` an
+/// implicit `name` binding in later bodies. On by default; opt out with
+/// `default-features = false`.
+#[cfg(feature = "macros")]
+pub use rsspec_macros::{
+    context, describe, fcontext, fdescribe, fwhen, when, xcontext, xdescribe, xwhen,
+};
 
 /// Free-function backing for the optional macro layer (`describe!`, `it!`, …).
 ///

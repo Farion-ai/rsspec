@@ -187,6 +187,9 @@ enum BeforeArgs {
         in_ty: Type,
         body: Block,
     },
+    /// `{ … }` — a plain side-effect hook (no fixture), returns (); in-scope
+    /// fixtures are read implicitly, like an `it!` block.
+    Block(Block),
 }
 
 impl Parse for BeforeArgs {
@@ -210,6 +213,8 @@ impl Parse for BeforeArgs {
                     body: input.parse()?,
                 })
             }
+        } else if input.peek(syn::token::Brace) {
+            Ok(BeforeArgs::Block(input.parse()?))
         } else {
             let name = input.parse()?;
             input.parse::<Token![:]>()?;
@@ -272,13 +277,17 @@ fn lower_before(
         } => Ok(quote! {
             ::rsspec::__rt::#reg(move |#param: &#in_ty| -> #out_ty #body);
         }),
-        BeforeArgs::ReadVoid {
-            param,
-            in_ty,
-            body,
-        } => Ok(quote! {
+        BeforeArgs::ReadVoid { param, in_ty, body } => Ok(quote! {
             ::rsspec::__rt::#reg(move |#param: &#in_ty| #body);
         }),
+        // Plain side-effect hook; in-scope fixtures read implicitly, returns ().
+        BeforeArgs::Block(body) => {
+            let stmts = &body.stmts;
+            let wrapped = wrap_reads(&fixtures[..], quote! { #(#stmts)* });
+            Ok(quote! {
+                ::rsspec::__rt::#reg(move || { #wrapped });
+            })
+        }
     }
 }
 

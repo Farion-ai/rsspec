@@ -26,7 +26,9 @@ fn inner_before_all_chains_from_outer_via_explicit_closure() {
                         available: account.balance - 25,
                     }
                 });
-                it!("derives availability", |s: &Statement| assert_eq!(s.available, 75));
+                it!("derives availability", |s: &Statement| {
+                    assert_eq!(s.available, 75);
+                });
             });
         });
     });

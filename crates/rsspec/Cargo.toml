@@ -11,7 +11,10 @@ description = "A Ginkgo/RSpec-inspired BDD testing framework for Rust."
 readme = "../../README.md"
 
 [features]
-default = []
+default = ["macros"]
+# Proc-macro layer: describe!/it!/before_all! with implicit fixture params.
+# Opt out with `default-features = false` to skip the syn build cost.
+macros = ["dep:rsspec_macros"]
 googletest = ["dep:googletest"]
 tokio = ["dep:tokio"]
 # Run distinct top-level describe/it/ordered subtrees on worker threads.
@@ -19,6 +22,7 @@ tokio = ["dep:tokio"]
 parallel = []
 
 [dependencies]
+rsspec_macros = { version = "0.6.0", path = "../rsspec_macros", optional = true }
 googletest = { version = "0.14", optional = true }
 tokio = { version = "1", features = ["rt"], optional = true }
 
@@ -47,4 +51,12 @@ required-features = ["tokio"]
 name = "parallel_test"
 harness = false
 required-features = ["parallel"]
+
+[[test]]
+name = "macros_test"
+required-features = ["macros"]
+
+[[test]]
+name = "seam_smoke"
+required-features = ["macros"]
 
