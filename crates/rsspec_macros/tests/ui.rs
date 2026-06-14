@@ -4,6 +4,13 @@
 
 #[test]
 fn ui() {
+    // trybuild pins the compiler's rendering of our diagnostics, which can drift
+    // across rustc versions. Run only where `RSSPEC_UI_TESTS` is set (the main CI
+    // job and local refreshes), never on the MSRV toolchain.
+    if std::env::var_os("RSSPEC_UI_TESTS").is_none() {
+        eprintln!("skipping UI tests (set RSSPEC_UI_TESTS=1 to run)");
+        return;
+    }
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/*.rs");
 }

@@ -24,6 +24,9 @@
 //!
 //! ## Features
 //!
+//! - `macros` *(default)* — `describe!`/`it!`/`before_all!` (and the rest) as a
+//!   proc-macro, with implicit fixture params; opt out with
+//!   `default-features = false`
 //! - `googletest` — re-exports `googletest` matchers via `rsspec::matchers`
 //! - `tokio` — async test support via `async_it`, `async_before_each`, etc.
 //! - `parallel` — run distinct top-level subtrees on worker threads (adds a

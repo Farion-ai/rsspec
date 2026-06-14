@@ -22,15 +22,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Re-exported (doc-hidden) and **sealed** `IntoBeforeHook`, the marker-dispatch
   trait backing the `before_*` hooks' read/return forms.
 
-- **Optional macro layer.** Opt-in `macro_rules!` sugar over the closure API:
+- **Optional macro layer with implicit fixture parameters.** A proc-macro
+  (`rsspec_macros`, on by default behind the `macros` feature) provides the
   `describe!`/`context!`/`when!` (+ `f`/`x` variants), `it!`/`specify!` (+ `fit!`/
   `xit!`), and `before_all!`/`before_each!`/`after_each!`/`after_all!`/
-  `just_before_each!`. An `it!` body can be a block, a bare boolean (asserted, with
-  the source shown on failure), a `|v: &T|` fixture closure, or `async { … }`
-  (feature `tokio`) — collapsing the `async_*` method set into one name. Trailing
-  decorators `tags=[..], retries=N, timeout=MS, must_pass_repeatedly=N`. The macros
+  `just_before_each!` surface. A fixture declared `before_all!(name: T = …)` is
+  then available by its bare `name` in later `it!`/hook bodies — no per-`it`
+  `|v: &T|` parameter — so "arrange & act once, assert often" carries no
+  per-assertion ceremony. An `it!` body is a block (in-scope fixtures read
+  implicitly), an explicit `|v: &T|` closure (the runtime hands the reference in),
+  or `async { … }` (feature `tokio`); trailing decorators `tags=[…], retries=N,
+  timeout=MS, must_pass_repeatedly=N` apply. Two in-scope fixtures of the same
+  type are a compile error — implicit reads can't disambiguate them. The macros
   lower to the same builder calls as the closure API and interoperate with it, so
-  dropping back to closures is mechanical. No new dependency.
+  dropping back to closures is mechanical. Opt out with `default-features = false`
+  to skip the proc-macro build cost.
 - Re-exported (doc-hidden) and **sealed** `IntoTestBody`, the marker-dispatch
   trait the `it!` macros name in their bounds — sealing keeps it
   non-implementable downstream so its signature can evolve.

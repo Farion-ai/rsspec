@@ -41,9 +41,13 @@ jobs:
 
       - name: Test
         run: cargo test --all-features
+        env:
+          # Run the trybuild UI tests here (current stable) but not on MSRV,
+          # where the compiler's diagnostic rendering may differ.
+          RSSPEC_UI_TESTS: "1"
 
       - name: Test (no default features)
-        run: cargo test
+        run: cargo test --no-default-features
 
       - name: Security audit
         uses: rustsec/audit-check@60938257f43cbff4e81b76dc3ba0aad74cfcc7b1 # v2.0.0
