@@ -226,7 +226,11 @@ impl Parse for BeforeArgs {
     }
 }
 
-/// A syntactic key for a fixture type, used to detect same-type collisions.
+/// A best-effort syntactic key for a fixture type, used for the compile-time
+/// same-type collision hint. This is token text, not type identity — `Vec<u8>`
+/// and `std::vec::Vec<u8>` key differently. The exact check is the runtime
+/// `TypeId` guard in `rsspec`'s `store_scope_setup_value`; this only catches the
+/// common same-spelling case early, with a nicer diagnostic.
 fn type_key(ty: &Type) -> String {
     quote!(#ty).to_string()
 }
@@ -243,9 +247,10 @@ fn lower_before(
     };
     match parse2::<BeforeArgs>(mac.tokens.clone())? {
         BeforeArgs::Named { name, ty, expr } => {
-            // Two in-scope fixtures of the same type can't be told apart by an
-            // implicit read: both `with_fixture::<T>` calls resolve to the
-            // innermost value. Reject the collision rather than silently last-wins.
+            // Best-effort compile-time hint: two in-scope fixtures whose types are
+            // written the same way can't be told apart by an implicit read. The
+            // exact backstop is the runtime `TypeId` guard (store_scope_setup_value);
+            // this fires early with a clearer diagnostic for the common case.
             let key = type_key(&ty);
             if let Some(prev) = fixtures.iter().find(|f| type_key(&f.ty) == key) {
                 let prev = &prev.name;
@@ -355,7 +360,9 @@ enum ItBody {
         body: Box<Expr>,
     },
     /// `async { … }` — lowered to `__rt::async_test`; no injection, since a
-    /// fixture borrow can't be held across `.await`.
+    /// fixture borrow can't be held across `.await`. Requires the consumer to
+    /// enable `rsspec`'s `tokio` feature (the only place `__rt::async_test`
+    /// exists); without it the arm fails to resolve in the generated code.
     Async(Block),
 }
 
@@ -466,13 +473,18 @@ fn lower_it(mac: &Macro, fixtures: &[Fixture], ctor: &str) -> syn::Result<TokenS
 
 // ---- read injection ---------------------------------------------------------
 
-/// Wrap `inner` in one `with_fixture::<T,_>(|name| …)` per in-scope fixture
-/// (innermost = `inner`). The closure parameter reuses the fixture's declared
-/// ident span, so the body's bare `name` resolves to it. A body that doesn't use
-/// a given fixture just ignores the binding (`let _ = &name;` silences it).
+/// Wrap `inner` in one `with_fixture::<T,_>(|name| …)` for each in-scope fixture
+/// the body actually names (innermost = `inner`). The closure parameter reuses the
+/// fixture's declared ident span, so the body's bare `name` resolves to it.
+/// Fixtures the body never mentions are skipped — a spec reads only what it uses —
+/// and the `let _ = &name;` guard still silences a name that appears only as a
+/// like-named method or field.
 fn wrap_reads(fixtures: &[Fixture], inner: TokenStream2) -> TokenStream2 {
     let mut acc = inner;
     for f in fixtures.iter().rev() {
+        if !mentions_ident(&acc, &f.name) {
+            continue;
+        }
         let name = &f.name;
         let ty = &f.ty;
         acc = quote! {
@@ -483,4 +495,15 @@ fn wrap_reads(fixtures: &[Fixture], inner: TokenStream2) -> TokenStream2 {
         };
     }
     acc
+}
+
+/// Whether `tokens` contains the identifier `name` anywhere, recursing into
+/// groups. Drives `wrap_reads`' decision to inject a fixture read only when the
+/// body refers to it.
+fn mentions_ident(tokens: &TokenStream2, name: &Ident) -> bool {
+    tokens.clone().into_iter().any(|tt| match tt {
+        proc_macro2::TokenTree::Ident(id) => id == *name,
+        proc_macro2::TokenTree::Group(g) => mentions_ident(&g.stream(), name),
+        _ => false,
+    })
 }
