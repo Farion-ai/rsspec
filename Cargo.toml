@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/rsspec"]
+members = ["crates/rsspec", "crates/rsspec-macros"]
 
 [workspace.package]
 version = "0.6.0"

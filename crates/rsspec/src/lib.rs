@@ -79,6 +79,12 @@ pub mod __rt {
         Context.just_before_each(hook);
     }
 
+    /// Read an in-scope fixture by type — backs the macro layer's implicit
+    /// parameters. A thin typed alias over `with_setup_value`.
+    pub fn with_fixture<T: 'static, R>(f: impl FnOnce(&T) -> R) -> R {
+        crate::with_setup_value::<T, R>(f)
+    }
+
     /// Wrap an `async { … }` spec/hook body into a `Fn()`. Backs the `it!` async arm.
     #[cfg(feature = "tokio")]
     pub fn async_test<F, Fut>(f: F) -> impl Fn() + 'static

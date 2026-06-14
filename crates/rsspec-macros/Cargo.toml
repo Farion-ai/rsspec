@@ -1,0 +1,19 @@
+[package]
+name = "rsspec-macros"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Proc-macro layer for rsspec — describe!/it!/before_all! with implicit fixtures."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2.0", features = ["full", "parsing", "printing"] }
+quote = "1.0"
+proc-macro2 = "1.0"
+
+[dev-dependencies]
+rsspec = { path = "../rsspec" }
