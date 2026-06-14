@@ -14,8 +14,8 @@ pub struct Plain(());
 #[doc(hidden)]
 pub struct WithSetup<T>(std::marker::PhantomData<T>);
 
-/// Sealing supertrait — keeps `IntoTestBody` non-implementable downstream so
-/// `into_test_fn`'s signature can evolve. Marker-generic so the two blanket
+/// Sealing supertrait — keeps `IntoTestBody` and `IntoBeforeHook` non-implementable
+/// downstream so their signatures can evolve. Marker-generic so the two blanket
 /// impls below cannot overlap.
 mod private {
     pub trait Sealed<Marker> {}
@@ -31,8 +31,14 @@ pub trait IntoTestBody<Marker>: private::Sealed<Marker> {
     fn into_test_fn(self) -> crate::TestBody;
 }
 
-impl<F: Fn() + crate::MaybeSend + 'static> private::Sealed<Plain> for F {}
-impl<T: 'static, F: Fn(&T) + crate::MaybeSend + 'static> private::Sealed<WithSetup<T>> for F {}
+// Sealing impls shared by `IntoTestBody` and `IntoBeforeHook`. The return type is
+// left free (`-> T`) so a single seal covers both the value-discarding closures
+// (`Fn()` / `Fn(&T)`, used by `it` / `after_*`) and the value-returning ones
+// (`Fn() -> T` / `Fn(&U) -> T`, used by `before_*`). The markers keep the two
+// blanket impls from overlapping; `mod private` keeps the trait unimplementable
+// downstream.
+impl<T, F: Fn() -> T + crate::MaybeSend + 'static> private::Sealed<Plain> for F {}
+impl<U, T, F: Fn(&U) -> T + crate::MaybeSend + 'static> private::Sealed<WithSetup<U>> for F {}
 
 impl<F: Fn() + crate::MaybeSend + 'static> IntoTestBody<Plain> for F {
     fn into_test_fn(self) -> crate::TestBody {
@@ -44,6 +50,66 @@ impl<T: 'static, F: Fn(&T) + crate::MaybeSend + 'static> IntoTestBody<WithSetup<
     fn into_test_fn(self) -> crate::TestBody {
         Box::new(move || {
             crate::with_setup_value::<T, _>(|val| self(val));
+        })
+    }
+}
+
+// ============================================================================
+// IntoBeforeHook — marker-type dispatch for before_each/before_all
+// ============================================================================
+//
+// before_* hooks differ from `it`/after_* in that they may also *return* a new
+// fixture (stored by type when `T != ()`). The two markers mirror `IntoTestBody`:
+// `Plain` is `Fn() -> T` (no read), `WithSetup<U>` is `Fn(&U) -> T` (reads a
+// fixture from an enclosing scope, exactly like `it(|v: &U|)`).
+
+/// Selects which fixture store a returning `before_*` hook writes into.
+#[doc(hidden)]
+#[derive(Clone, Copy)]
+pub enum FixtureScope {
+    /// Per-test store, cleared between tests (`before_each`).
+    PerTest,
+    /// Per-describe-scope store, persists across the scope's tests (`before_all`).
+    PerScope,
+}
+
+/// Store a returning hook's value, unless it is the unit type (side-effect-only
+/// hooks return `()` and store nothing).
+fn store_before_value<T: 'static>(scope: FixtureScope, val: T) {
+    if std::any::TypeId::of::<T>() != std::any::TypeId::of::<()>() {
+        match scope {
+            FixtureScope::PerScope => crate::store_scope_setup_value(val),
+            FixtureScope::PerTest => crate::store_setup_value(val),
+        }
+    }
+}
+
+/// Trait that converts a `before_each`/`before_all` closure into a boxed hook
+/// body. Marker-generic (`Plain` / `WithSetup<U>`) so the no-read and fixture-
+/// reading forms dispatch without overlap. Sealed — not a user extension point.
+#[doc(hidden)]
+pub trait IntoBeforeHook<Marker>: private::Sealed<Marker> {
+    fn into_before_fn(self, scope: FixtureScope) -> crate::TestBody;
+}
+
+impl<T: 'static, F: Fn() -> T + crate::MaybeSend + 'static> IntoBeforeHook<Plain> for F {
+    fn into_before_fn(self, scope: FixtureScope) -> crate::TestBody {
+        Box::new(move || store_before_value(scope, self()))
+    }
+}
+
+impl<U: 'static, T: 'static, F: Fn(&U) -> T + crate::MaybeSend + 'static>
+    IntoBeforeHook<WithSetup<U>> for F
+{
+    fn into_before_fn(self, scope: FixtureScope) -> crate::TestBody {
+        Box::new(move || {
+            // Safe re-entrancy: `self(u)` runs under a shared borrow of the
+            // fixture store, and the only writers (`store_*_setup_value`) are
+            // `pub(crate)` and never reachable from a hook body — so no
+            // `borrow_mut` can fire mid-read. The read borrow is then released
+            // when `with_setup_value` returns `val`, before the store below.
+            let val = crate::with_setup_value::<U, _>(|u| self(u));
+            store_before_value(scope, val);
         })
     }
 }
@@ -327,32 +393,45 @@ impl Context {
     /// by `it` blocks via a `|val: &T|` parameter. Closures that return `()` are
     /// treated as side-effect-only hooks (backward-compatible with the original API).
     ///
+    /// The closure may also *read* a fixture from an enclosing scope via a `&U`
+    /// parameter (one per hook), exactly like `it(|v: &U|)`, and derive its own
+    /// value from it. Async hooks cannot read a fixture (the borrow can't be held
+    /// across `.await`).
+    ///
     /// ```rust,no_run
     /// # fn main() { rsspec::run(|ctx| {
     /// // Returning a fixture — received as &T by it blocks
     /// ctx.before_each(|| -> String { "hello".to_string() });
     /// ctx.it("receives the value", |s: &String| { assert_eq!(s, "hello"); });
     ///
+    /// // Reading an enclosing-scope fixture and deriving a per-test one
+    /// ctx.before_all(|| -> String { "base".to_string() });
+    /// ctx.before_each(|base: &String| -> usize { base.len() });
+    /// ctx.it("derived from the scope fixture", |n: &usize| { assert_eq!(*n, 4); });
+    ///
     /// // Side-effect only — returns () silently, no fixture stored
     /// ctx.before_each(|| { /* setup */ });
     /// ctx.it("no fixture needed", || { assert!(true); });
     /// # }); }
     /// ```
-    pub fn before_each<T: 'static>(&self, hook: impl Fn() -> T + crate::MaybeSend + 'static) {
-        with_builder(|b| {
-            b.add_before_each(Box::new(move || {
-                let val = hook();
-                if std::any::TypeId::of::<T>() != std::any::TypeId::of::<()>() {
-                    crate::store_setup_value(val);
-                }
-            }))
-        });
+    pub fn before_each<M>(&self, hook: impl IntoBeforeHook<M> + 'static) {
+        with_builder(|b| b.add_before_each(hook.into_before_fn(FixtureScope::PerTest)));
     }
 
     /// Register a hook that runs after every test in this scope and nested scopes,
     /// even if the test panics. Multiple `after_each` hooks run inner-to-outer.
-    pub fn after_each(&self, hook: impl Fn() + crate::MaybeSend + 'static) {
-        with_builder(|b| b.add_after_each(Box::new(hook)));
+    /// May read an enclosing-scope fixture via a `&T` parameter (e.g. for teardown).
+    ///
+    /// An `after_*` hook cannot *return* a fixture — there is no later consumer —
+    /// so a returning closure is rejected at compile time:
+    ///
+    /// ```compile_fail
+    /// # fn main() { rsspec::run(|ctx| {
+    /// ctx.after_each(|| -> String { "nowhere to go".to_string() });
+    /// # }); }
+    /// ```
+    pub fn after_each<M>(&self, hook: impl IntoTestBody<M> + 'static) {
+        with_builder(|b| b.add_after_each(hook.into_test_fn()));
     }
 
     /// Register a hook that runs once before all tests in this describe scope.
@@ -361,27 +440,45 @@ impl Context {
     /// If the closure returns a value, it is stored and can be received by
     /// `it` blocks via a `|val: &T|` parameter. The value persists across
     /// all tests in the scope (not cleared between tests).
-    pub fn before_all<T: 'static>(&self, hook: impl Fn() -> T + crate::MaybeSend + 'static) {
-        with_builder(|b| {
-            b.add_before_all(Box::new(move || {
-                let val = hook();
-                if std::any::TypeId::of::<T>() != std::any::TypeId::of::<()>() {
-                    crate::store_scope_setup_value(val);
-                }
-            }))
-        });
+    ///
+    /// The closure may also read a fixture from an enclosing scope via a `&U`
+    /// parameter — the canonical "act once" seam, where an inner `before_all`
+    /// derives per-context results from an expensive outer fixture:
+    ///
+    /// ```rust,no_run
+    /// # fn main() { rsspec::run(|ctx| {
+    /// ctx.before_all(|| -> String { "expensive".to_string() });
+    /// ctx.describe("derived", |ctx| {
+    ///     ctx.before_all(|env: &String| -> usize { env.len() });
+    ///     ctx.it("uses the derived value", |n: &usize| { assert_eq!(*n, 9); });
+    /// });
+    /// # }); }
+    /// ```
+    pub fn before_all<M>(&self, hook: impl IntoBeforeHook<M> + 'static) {
+        with_builder(|b| b.add_before_all(hook.into_before_fn(FixtureScope::PerScope)));
     }
 
     /// Register a hook that runs once after all tests in this describe scope.
     /// Not inherited by nested scopes. Runs even if `before_all` panicked.
-    pub fn after_all(&self, hook: impl Fn() + crate::MaybeSend + 'static) {
-        with_builder(|b| b.add_after_all(Box::new(hook)));
+    /// May read an enclosing-scope fixture via a `&T` parameter (e.g. for teardown).
+    ///
+    /// Like `after_each`, it cannot return a fixture — a returning closure is a
+    /// compile error:
+    ///
+    /// ```compile_fail
+    /// # fn main() { rsspec::run(|ctx| {
+    /// ctx.after_all(|| -> String { "nowhere to go".to_string() });
+    /// # }); }
+    /// ```
+    pub fn after_all<M>(&self, hook: impl IntoTestBody<M> + 'static) {
+        with_builder(|b| b.add_after_all(hook.into_test_fn()));
     }
 
     /// Register a hook that runs after all `before_each` hooks but immediately
     /// before the test body. Useful for final setup that must run last.
-    pub fn just_before_each(&self, hook: impl Fn() + crate::MaybeSend + 'static) {
-        with_builder(|b| b.add_just_before_each(Box::new(hook)));
+    /// May read an enclosing-scope fixture via a `&T` parameter.
+    pub fn just_before_each<M>(&self, hook: impl IntoTestBody<M> + 'static) {
+        with_builder(|b| b.add_just_before_each(hook.into_test_fn()));
     }
 
     // ---- Labels on current describe ------------------------------------------

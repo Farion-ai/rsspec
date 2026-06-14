@@ -35,7 +35,7 @@ pub(crate) mod ordered;
 pub(crate) mod runner;
 pub(crate) mod table;
 
-pub use context::{run, run_inline, Context, IntoTestBody, ItBuilder};
+pub use context::{run, run_inline, Context, IntoBeforeHook, IntoTestBody, ItBuilder};
 
 /// Free-function backing for the optional macro layer (`describe!`, `it!`, …).
 ///
@@ -63,19 +63,19 @@ pub mod __rt {
         Context.xit(name, body)
     }
 
-    pub fn before_each<T: 'static>(hook: impl Fn() -> T + crate::MaybeSend + 'static) {
+    pub fn before_each<M>(hook: impl crate::IntoBeforeHook<M> + 'static) {
         Context.before_each(hook);
     }
-    pub fn before_all<T: 'static>(hook: impl Fn() -> T + crate::MaybeSend + 'static) {
+    pub fn before_all<M>(hook: impl crate::IntoBeforeHook<M> + 'static) {
         Context.before_all(hook);
     }
-    pub fn after_each(hook: impl Fn() + crate::MaybeSend + 'static) {
+    pub fn after_each<M>(hook: impl crate::IntoTestBody<M> + 'static) {
         Context.after_each(hook);
     }
-    pub fn after_all(hook: impl Fn() + crate::MaybeSend + 'static) {
+    pub fn after_all<M>(hook: impl crate::IntoTestBody<M> + 'static) {
         Context.after_all(hook);
     }
-    pub fn just_before_each(hook: impl Fn() + crate::MaybeSend + 'static) {
+    pub fn just_before_each<M>(hook: impl crate::IntoTestBody<M> + 'static) {
         Context.just_before_each(hook);
     }
 
@@ -616,34 +616,36 @@ pub(crate) fn store_scope_setup_value<T: 'static>(val: T) {
 pub(crate) fn with_setup_value<T: 'static, R>(f: impl FnOnce(&T) -> R) -> R {
     let tid = TypeId::of::<T>();
 
-    let in_test_store = SETUP_STORE.with(|cell| cell.borrow().contains_key(&tid));
-
-    if in_test_store {
-        SETUP_STORE.with(|cell| {
-            let store = cell.borrow();
-            let val = store
-                .get(&tid)
-                .expect("rsspec: TypeId present but value missing — internal invariant violated")
+    // Per-test store first, in a single borrow: on a hit `f` runs under the
+    // borrow and we return `Ok`; on a miss `f` is handed back unused via `Err`
+    // so the scope-stack fallthrough can still call it exactly once.
+    let f = match SETUP_STORE.with(|cell| {
+        let store = cell.borrow();
+        match store.get(&tid) {
+            Some(boxed) => Ok(f(boxed
                 .downcast_ref::<T>()
-                .expect("rsspec: TypeId/value type mismatch — internal invariant violated");
-            f(val)
-        })
-    } else {
-        SCOPE_SETUP_STACK.with(|cell| {
-            let stack = cell.borrow();
-            for layer in stack.iter().rev() {
-                if let Some(boxed) = layer.get(&tid) {
-                    return f(boxed.downcast_ref::<T>().expect(
-                        "rsspec: TypeId/value type mismatch — internal invariant violated",
-                    ));
-                }
+                .expect("rsspec: TypeId/value type mismatch — internal invariant violated"))),
+            None => Err(f),
+        }
+    }) {
+        Ok(r) => return r,
+        Err(f) => f,
+    };
+
+    SCOPE_SETUP_STACK.with(|cell| {
+        let stack = cell.borrow();
+        for layer in stack.iter().rev() {
+            if let Some(boxed) = layer.get(&tid) {
+                return f(boxed.downcast_ref::<T>().expect(
+                    "rsspec: TypeId/value type mismatch — internal invariant violated",
+                ));
             }
-            panic!(
-                "rsspec: no value of type `{}` — add a returning before_each or before_all",
-                std::any::type_name::<T>()
-            )
-        })
-    }
+        }
+        panic!(
+            "rsspec: no value of type `{}` — add a returning before_each or before_all",
+            std::any::type_name::<T>()
+        )
+    })
 }
 
 /// Clear per-test values. Called by the runner between tests.

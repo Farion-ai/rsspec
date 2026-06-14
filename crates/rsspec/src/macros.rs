@@ -190,12 +190,24 @@ macro_rules! __it_decorate {
 
 // ---- hooks ----------------------------------------------------------------
 
-/// Run once before all specs in scope. Fixture form `before_all!(name: T = expr)`
-/// stores `T` for `it!(.., |v: &T| ..)`; block form runs for side effects. The
-/// fixture is keyed by **type**, not by `name` (which is documentary), so two
-/// same-type fixtures in one scope collide — last one wins.
+/// Run once before all specs in scope. Forms:
+/// - `before_all!(name: T = expr)` — stores `T` for `it!(.., |v: &T| ..)`.
+/// - `before_all!(|env: &U| -> T { .. })` — reads an enclosing-scope fixture `&U`
+///   and stores the returned `T` (the read form drops the documentary name).
+/// - `before_all!(|env: &U| { .. })` — reads `&U` for side effects only.
+/// - `before_all!({ .. })` — side effects only.
+///
+/// The fixture is keyed by **type**, not by `name` (which is documentary), so two
+/// same-type fixtures in one scope collide — last one wins. The read parameter
+/// must be `&U`; an owned `|env: U|` is rejected. Arity is one fixture per hook.
 #[macro_export]
 macro_rules! before_all {
+    (| $p:ident : & $in:ty | -> $out:ty $body:block) => {
+        $crate::__rt::before_all(move |$p: &$in| -> $out { $body })
+    };
+    (| $p:ident : & $in:ty | $body:block) => {
+        $crate::__rt::before_all(move |$p: &$in| $body)
+    };
     ($name:ident : $ty:ty = $init:expr) => {
         $crate::__rt::before_all(move || -> $ty { $init })
     };
@@ -204,9 +216,15 @@ macro_rules! before_all {
     };
 }
 
-/// Run before every spec in scope. Fixture or block form (see [`before_all!`]).
+/// Run before every spec in scope. Fixture, read, or block form (see [`before_all!`]).
 #[macro_export]
 macro_rules! before_each {
+    (| $p:ident : & $in:ty | -> $out:ty $body:block) => {
+        $crate::__rt::before_each(move |$p: &$in| -> $out { $body })
+    };
+    (| $p:ident : & $in:ty | $body:block) => {
+        $crate::__rt::before_each(move |$p: &$in| $body)
+    };
     ($name:ident : $ty:ty = $init:expr) => {
         $crate::__rt::before_each(move || -> $ty { $init })
     };
@@ -215,23 +233,34 @@ macro_rules! before_each {
     };
 }
 
-/// Run after every spec in scope (even on panic).
+/// Run after every spec in scope (even on panic). `after_each!(|env: &T| { .. })`
+/// reads an enclosing-scope fixture; `after_each!({ .. })` is side-effect only.
 #[macro_export]
 macro_rules! after_each {
+    (| $p:ident : & $ty:ty | $body:block) => {
+        $crate::__rt::after_each(move |$p: &$ty| $body)
+    };
     ($body:block) => {
         $crate::__rt::after_each(move || $body)
     };
 }
-/// Run once after all specs in scope.
+/// Run once after all specs in scope. Read form `after_all!(|env: &T| { .. })`.
 #[macro_export]
 macro_rules! after_all {
+    (| $p:ident : & $ty:ty | $body:block) => {
+        $crate::__rt::after_all(move |$p: &$ty| $body)
+    };
     ($body:block) => {
         $crate::__rt::after_all(move || $body)
     };
 }
-/// Run after all `before_each`, immediately before each spec body.
+/// Run after all `before_each`, immediately before each spec body. Read form
+/// `just_before_each!(|env: &T| { .. })`.
 #[macro_export]
 macro_rules! just_before_each {
+    (| $p:ident : & $ty:ty | $body:block) => {
+        $crate::__rt::just_before_each(move |$p: &$ty| $body)
+    };
     ($body:block) => {
         $crate::__rt::just_before_each(move || $body)
     };

@@ -173,6 +173,26 @@ before_all (once) -> before_each -> just_before_each -> body -> after_each -> af
 - **Ordered tests:** `before_each` and `after_each` from parent describes wrap the *entire* ordered sequence, not each individual step.
 - **Filtering optimization:** `before_all`/`after_all` are skipped when all children in a scope are filtered out (by labels or focus mode), avoiding unnecessary setup.
 
+**Reading fixtures in hooks.** A returning `before_all`/`before_each` defines a fixture (keyed by type); any hook can *read* a fixture from an enclosing scope via a `&T` parameter, exactly like `it(|v: &T|)`. This is the "act once, assert often" seam — build one expensive fixture, then let nested setup derive per-context results from it:
+
+```rust
+ctx.describe("PURL lookup", |ctx| {
+    ctx.before_all(|| -> TestEnv { TestEnv::seed() });        // expensive, once
+
+    ctx.describe("core lookup", |ctx| {
+        ctx.before_all(|env: &TestEnv| -> CoreResults {       // reads env, stores results
+            CoreResults { affected: env.lookup(purl), fixed: env.fixed(purl) }
+        });
+        ctx.it("finds affected", |r: &CoreResults| { assert_eq!(r.affected.len(), 1); });
+        ctx.it("returns empty for fixed", |r: &CoreResults| { assert!(r.fixed.is_empty()); });
+    });
+
+    ctx.after_all(|env: &TestEnv| { env.teardown(); });        // reads env for cleanup
+});
+```
+
+One fixture per hook. Async hooks cannot read a fixture (the borrow can't be held across `.await`).
+
 ### Decorators
 
 Attach metadata to `it` blocks using the fluent builder API:
@@ -319,8 +339,10 @@ Trailing decorators in any order: `tags=[..]`, `retries=N`, `timeout=MS`,
 `fwhen!`, pending `xdescribe!` / `xcontext!` / `xwhen!`.
 
 **Hooks** — `before_all!` / `before_each!` take a fixture form `before_all!(name: T =
-expr)` (stored for `|name: &T|` readers) or a `{ block }` side-effect form; `after_each!`
-/ `after_all!` / `just_before_each!` take a `{ block }`.
+expr)` (stored for `|name: &T|` readers), a read-and-return form `before_all!(|env: &U|
+-> T { .. })` that reads an enclosing-scope fixture and stores its result, or a `{ block }`
+side-effect form. `after_each!` / `after_all!` / `just_before_each!` take a `{ block }` or a
+read form `after_all!(|env: &T| { .. })`.
 
 > **Note:** Reading a fixture still names its type at each `it` (`|resp: &T|`) — the
 > macros remove the structural scaffolding, not that annotation. Everything lowers to the

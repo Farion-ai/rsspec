@@ -6,8 +6,9 @@
 //! apply, and the bool-assertion sugar actually asserts. `run_inline` panics on
 //! any spec failure, so a mis-lowered spec fails the enclosing `#[test]`.
 
-use rsspec::{before_all, before_each, context, describe, fit, it, xit};
+use rsspec::{after_all, before_all, before_each, context, describe, fit, it, xit};
 use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+use std::sync::{Arc, Mutex};
 
 #[test]
 fn describe_context_it_run_nested_specs() {
@@ -43,6 +44,48 @@ fn before_all_fixture_flows_into_it() {
             ));
         });
     });
+}
+
+#[test]
+fn before_all_macro_reads_parent_fixture() {
+    struct Env {
+        base: u32,
+    }
+    struct Results {
+        v: u32,
+    }
+
+    rsspec::run_inline(|_| {
+        describe!("outer", {
+            before_all!(env: Env = Env { base: 10 });
+            describe!("inner", {
+                before_all!(|env: &Env| -> Results { Results { v: env.base + 5 } });
+                it!("derives from the parent fixture", |r: &Results| assert_eq!(r.v, 15));
+            });
+        });
+    });
+}
+
+#[test]
+fn after_all_macro_reads_fixture() {
+    struct Env {
+        id: u32,
+    }
+
+    let seen = Arc::new(Mutex::new(Vec::<u32>::new()));
+    let seen_hook = Arc::clone(&seen);
+
+    rsspec::run_inline(move |_| {
+        describe!("x", {
+            before_all!(env: Env = Env { id: 9 });
+            it!("uses env", |_e: &Env| assert!(true));
+            after_all!(|e: &Env| {
+                seen_hook.lock().unwrap().push(e.id);
+            });
+        });
+    });
+
+    assert_eq!(*seen.lock().unwrap(), vec![9]);
 }
 
 #[test]

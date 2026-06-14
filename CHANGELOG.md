@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Hooks read enclosing-scope fixtures via `&T` params.** `before_all`,
+  `before_each`, `after_all`, `after_each`, and `just_before_each` now accept a
+  closure that takes a `&T` reference to a fixture from an outer scope — the same
+  way `it(|v: &T|)` already did. A returning `before_all` can thus *read* an outer
+  fixture and *write* its own, enabling the "act once, assert often" seam where an
+  inner `before_all` derives per-context results from one expensive outer fixture,
+  and `after_all` can use the fixture for teardown. Works in both the closure API
+  and the macro layer (`before_all!(|env: &T| -> U { .. })`, `after_all!(|env: &T|
+  { .. })`). One fixture per hook; async hooks cannot read fixtures (the borrow
+  can't be held across `.await`). The no-parameter forms are unchanged.
+- Re-exported (doc-hidden) and **sealed** `IntoBeforeHook`, the marker-dispatch
+  trait backing the `before_*` hooks' read/return forms.
+
 - **Optional macro layer.** Opt-in `macro_rules!` sugar over the closure API:
   `describe!`/`context!`/`when!` (+ `f`/`x` variants), `it!`/`specify!` (+ `fit!`/
   `xit!`), and `before_all!`/`before_each!`/`after_each!`/`after_all!`/
