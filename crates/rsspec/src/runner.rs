@@ -628,6 +628,9 @@ fn run_suites_sequential(
             &mut result,
         );
 
+        // Drop this suite's async runtime (if any) before the next suite runs.
+        crate::teardown_suite_runtime();
+
         if suites.len() > 1 {
             ctx.sink.blank();
         }
@@ -816,6 +819,11 @@ fn render_unit(node: &TestNode, focus_mode: bool, config: &RunConfig) -> (String
         let mut path = Vec::new();
         run_node(node, 0, &mut path, &mut hooks, false, &mut ctx, &mut result);
     } // ctx (and its borrow of buf) dropped here
+
+    // Drop this subtree's async runtime (if any) — it lives no longer than the
+    // worker that built it, and the worker is reused for the next subtree.
+    crate::teardown_suite_runtime();
+
     (buf, result)
 }
 

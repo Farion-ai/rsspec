@@ -385,20 +385,36 @@ ctx.async_it("flaky network call", || async {
 .labels(&["integration"]);
 ```
 
-Async hooks:
+Async hooks — including value-returning ones that build a fixture once. A
+connection pool created in an async `before_all` stays usable in later hooks and
+tests because the whole subtree shares one runtime (see below):
 
 ```rust
 ctx.describe("with async setup", |ctx| {
-    ctx.async_before_each(|| async {
-        setup_database().await;
+    // Build the pool once, on the suite runtime, and store it as a fixture.
+    ctx.async_before_all(|| async {
+        PgPool::connect("postgres://localhost/test").await.unwrap()
     });
 
-    ctx.async_after_each(|| async {
-        cleanup_database().await;
+    ctx.async_it("uses the pool", || async {
+        // Clone the pool out of the fixture synchronously, then await on it —
+        // a `&T` cannot be held across `.await`, but `PgPool` is `Clone`.
+        let pool = rsspec::__rt::with_fixture::<PgPool, _>(|p| p.clone());
+        let rows = sqlx::query("SELECT 1").fetch_all(&pool).await.unwrap();
+        assert_eq!(rows.len(), 1);
     });
+});
+```
 
-    ctx.async_it("uses the database", || async {
-        let rows = query("SELECT 1").await;
+With the macro layer the same fixture is declared inline and read implicitly:
+
+```rust
+describe!("with async setup", {
+    before_all!(pool: PgPool = async {
+        PgPool::connect("postgres://localhost/test").await.unwrap()
+    });
+    it!("uses the pool", async {
+        let rows = sqlx::query("SELECT 1").fetch_all(&pool.clone()).await.unwrap();
         assert_eq!(rows.len(), 1);
     });
 });
@@ -444,9 +460,10 @@ ctx.it("manual async", rsspec::async_test(|| async {
 
 **Async runtime details:**
 
-- Each async test/hook gets a fresh **single-threaded** Tokio runtime (`new_current_thread`). This prevents cross-test state leakage and works correctly with retries.
+- All async hooks and tests in a subtree share **one** lazily-built single-threaded Tokio runtime (`new_current_thread().enable_all()`), created on first async use and dropped when the subtree finishes (one per worker thread under `parallel`). A resource bound to the runtime — a pool, a listener, a spawned task — therefore survives from one hook to the next. A subtree with no async work builds no runtime.
+- Because it is `current_thread` and runs on the runner thread, fixture reads (`with_fixture`) are valid inside async bodies. A `&T` fixture cannot be held across `.await`; clone out what you need first (pools and channel senders are `Clone`).
 - `tokio::spawn()` works but runs on the same thread — there is no multi-threaded parallelism within a single test.
-- **Do not create a nested Tokio runtime** inside an async test. Calling `Runtime::new()` inside an `async_it` block will panic with "Cannot start a runtime from within a runtime."
+- **Do not create a nested Tokio runtime** inside an async test. Calling `Runtime::new()` (or `block_on`) inside an `async_it` block will panic with "Cannot start a runtime from within a runtime."
 - The `|| async { ... }` pattern (closure returning a future) is required because Rust's `async Fn()` trait is not yet stable.
 
 ## Parallel Execution

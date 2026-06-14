@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Async value-returning lifecycle hooks on a suite-scoped runtime.**
+  `async_before_all` and `async_before_each` now resolve to a value `T` (was
+  `()` only), stored exactly like their sync counterparts — so an async
+  `before_all` can build a fixture (`before_all!(pool: Pool = async { … })`) and
+  later sync `it!` bodies read it implicitly. rsspec drives every async hook and
+  test in a subtree on **one** lazily-built `current_thread` Tokio runtime that
+  lives for the whole subtree (per worker thread under `parallel`) instead of a
+  throwaway runtime per call. A connection pool or IO handle created in an async
+  hook therefore stays usable across later hooks and tests — no more "IO driver
+  has terminated" — with no `block_on` in user code. A suite that runs no async
+  work builds no runtime. The `tokio` feature now enables the `net`, `time`, and
+  `sync` drivers so the runtime can do real IO under `enable_all`.
+
+### Changed
+
+- `async_before_all` / `async_before_each` gain a fixture type parameter
+  (inferred from the future's output); existing `Output = ()` hooks are
+  unaffected. A `&T` fixture still cannot be held across `.await` — read fixtures
+  with the closure accessor inside async bodies.
+
 ## [0.7.0] — 2026-06-14
 
 ### Added

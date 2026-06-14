@@ -24,7 +24,9 @@ parallel = []
 [dependencies]
 rsspec_macros = { version = "0.7.0", path = "../rsspec_macros", optional = true }
 googletest = { version = "0.14", optional = true }
-tokio = { version = "1", features = ["rt"], optional = true }
+# `net` + `time` give the lazily-built suite runtime real IO/timer drivers
+# (sqlx, axum, …) under `enable_all`; `sync` backs the async fixture tests.
+tokio = { version = "1", features = ["rt", "net", "time", "sync"], optional = true }
 
 [[test]]
 name = "describe_test"
@@ -48,6 +50,11 @@ harness = false
 required-features = ["tokio"]
 
 [[test]]
+name = "async_suite_runtime_test"
+harness = false
+required-features = ["tokio"]
+
+[[test]]
 name = "parallel_test"
 harness = false
 required-features = ["parallel"]
@@ -55,6 +62,11 @@ required-features = ["parallel"]
 [[test]]
 name = "macros_test"
 required-features = ["macros"]
+
+[[test]]
+name = "macros_async_test"
+harness = false
+required-features = ["macros", "tokio"]
 
 [[test]]
 name = "seam_smoke"

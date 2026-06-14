@@ -622,19 +622,19 @@ impl Context {
 
     // ---- Async Hooks ----------------------------------------------------------
 
-    /// Async variant of [`before_each`](Context::before_each).
-    /// Each invocation runs on a fresh single-threaded Tokio runtime.
+    /// Async variant of [`before_each`](Context::before_each), driven on the
+    /// suite-scoped runtime (see [`async_before_all`](Self::async_before_all)).
     ///
-    /// **Known limitation:** `async_before_each` cannot return a fixture value.
-    /// The `Future::Output` must be `()`. If you need async setup that passes a
-    /// value to `it` blocks, perform the setup synchronously and store the result
-    /// in a `static` or use `async_before_each` for side-effects only.
-    pub fn async_before_each<F, Fut>(&self, hook: F)
+    /// The future may resolve to a value `T`, which is stored per-test exactly
+    /// like a returning sync `before_each` — receive it in `it` blocks via a
+    /// `|v: &T|` parameter. A future resolving to `()` is a side-effect hook.
+    pub fn async_before_each<F, Fut, T>(&self, hook: F)
     where
         F: Fn() -> Fut + crate::MaybeSend + 'static,
-        Fut: std::future::Future<Output = ()> + 'static,
+        Fut: std::future::Future<Output = T> + 'static,
+        T: 'static,
     {
-        self.before_each(crate::async_test(hook));
+        self.before_each(move || -> T { crate::block_on_suite(hook()) });
     }
 
     /// Async variant of [`after_each`](Context::after_each).
@@ -648,16 +648,23 @@ impl Context {
     }
 
     /// Async variant of [`before_all`](Context::before_all).
-    /// Runs on a fresh single-threaded Tokio runtime.
     ///
-    /// **Known limitation:** `async_before_all` cannot return a fixture value.
-    /// See [`async_before_each`](Self::async_before_each) for details.
-    pub fn async_before_all<F, Fut>(&self, hook: F)
+    /// rsspec drives this (and every async hook/test in the subtree) on one
+    /// lazily-built `current_thread` Tokio runtime that lives for the whole
+    /// subtree — so a connection pool or IO handle created here stays usable in
+    /// later hooks and tests, with no `block_on` in your code.
+    ///
+    /// The future may resolve to a value `T`, which is stored per-scope exactly
+    /// like a returning sync `before_all` (received via `|v: &T|`). Read an
+    /// in-scope fixture from inside the body with the closure form (the borrow is
+    /// released before any `.await`); a `&T` cannot be held across `.await`.
+    pub fn async_before_all<F, Fut, T>(&self, hook: F)
     where
         F: Fn() -> Fut + crate::MaybeSend + 'static,
-        Fut: std::future::Future<Output = ()> + 'static,
+        Fut: std::future::Future<Output = T> + 'static,
+        T: 'static,
     {
-        self.before_all(crate::async_test(hook));
+        self.before_all(move || -> T { crate::block_on_suite(hook()) });
     }
 
     /// Async variant of [`after_all`](Context::after_all).

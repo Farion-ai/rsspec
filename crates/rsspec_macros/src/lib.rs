@@ -263,10 +263,26 @@ fn lower_before(
                     ),
                 ));
             }
-            // The expr may read earlier fixtures by bare name — inject those reads.
-            let body = wrap_reads(&fixtures[..], quote! { #expr });
-            let out = quote! {
-                ::rsspec::__rt::#reg(move || -> #ty { #body });
+            let out = if let Expr::Async(async_block) = &expr {
+                // `name: T = async { … }` — drive the future on the suite runtime
+                // and store its `T` output. Implicit fixture injection is skipped:
+                // a borrowed fixture can't be held across `.await`, so read any
+                // needed fixture explicitly (and synchronously) inside the block.
+                let stmts = &async_block.block.stmts;
+                let areg = if scope {
+                    quote!(async_before_all)
+                } else {
+                    quote!(async_before_each)
+                };
+                quote! {
+                    ::rsspec::__rt::#areg::<_, _, #ty>(move || async move { #(#stmts)* });
+                }
+            } else {
+                // The expr may read earlier fixtures by bare name — inject those reads.
+                let body = wrap_reads(&fixtures[..], quote! { #expr });
+                quote! {
+                    ::rsspec::__rt::#reg(move || -> #ty { #body });
+                }
             };
             fixtures.push(Fixture { name, ty });
             Ok(out)

@@ -106,6 +106,30 @@ pub mod __rt {
     {
         crate::async_test(f)
     }
+
+    /// Backs `before_all!(name: T = async { … })`. The future resolves to the
+    /// declared fixture type `T`, stored per-scope.
+    #[cfg(feature = "tokio")]
+    pub fn async_before_all<F, Fut, T>(hook: F)
+    where
+        F: Fn() -> Fut + crate::MaybeSend + 'static,
+        Fut: std::future::Future<Output = T> + 'static,
+        T: 'static,
+    {
+        Context.async_before_all(hook);
+    }
+
+    /// Backs `before_each!(name: T = async { … })`. The future resolves to `T`,
+    /// stored per-test.
+    #[cfg(feature = "tokio")]
+    pub fn async_before_each<F, Fut, T>(hook: F)
+    where
+        F: Fn() -> Fut + crate::MaybeSend + 'static,
+        Fut: std::future::Future<Output = T> + 'static,
+        T: 'static,
+    {
+        Context.async_before_each(hook);
+    }
 }
 
 /// Re-export of the [`googletest`] crate. Available with the `googletest` feature.
@@ -178,8 +202,8 @@ pub(crate) type TestBody = Box<dyn Fn()>;
 
 /// Wrap an async closure into a synchronous `Fn()` for use with rsspec.
 ///
-/// Creates a fresh single-threaded Tokio runtime per invocation, preventing
-/// cross-test state leakage and working correctly with retries.
+/// Drives the future on the subtree's shared suite runtime, so resources
+/// created in earlier async hooks remain usable here.
 ///
 /// # Example
 ///
@@ -196,13 +220,54 @@ where
     Fut: std::future::Future<Output = ()> + 'static,
 {
     move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("rsspec: failed to build Tokio runtime");
-        rt.block_on(f());
+        block_on_suite(f());
     }
 }
+
+#[cfg(feature = "tokio")]
+thread_local! {
+    /// The suite-scoped Tokio runtime. One `current_thread` runtime per subtree
+    /// (per worker thread under `parallel`), built lazily on the first async
+    /// hook/test and dropped at the subtree boundary by the runner. Held in an
+    /// `Rc` so `block_on_suite` can release the thread-local borrow before
+    /// `block_on` runs, keeping the access non-reentrant.
+    static SUITE_RUNTIME: RefCell<Option<std::rc::Rc<tokio::runtime::Runtime>>> =
+        const { RefCell::new(None) };
+}
+
+/// Drive `fut` to completion on the suite-scoped runtime, building it lazily on
+/// first use. Because the runtime is `current_thread` and `block_on` runs on the
+/// caller (runner) thread, the whole future executes on that one thread — so the
+/// thread-local fixture stores stay valid inside async bodies, and resources
+/// bound to the runtime (pools, IO handles) outlive a single hook.
+#[cfg(feature = "tokio")]
+pub(crate) fn block_on_suite<T>(fut: impl std::future::Future<Output = T>) -> T {
+    let rt = SUITE_RUNTIME.with(|cell| {
+        std::rc::Rc::clone(cell.borrow_mut().get_or_insert_with(|| {
+            std::rc::Rc::new(
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("rsspec: failed to build the suite Tokio runtime"),
+            )
+        }))
+    });
+    rt.block_on(fut)
+}
+
+/// Drop the suite runtime if one was built. Called by the runner at each subtree
+/// boundary (parallel) or at the end of each suite (sequential). A no-op when no
+/// async work ran, and compiled out entirely without the `tokio` feature.
+#[cfg(feature = "tokio")]
+pub(crate) fn teardown_suite_runtime() {
+    SUITE_RUNTIME.with(|cell| {
+        let _ = cell.borrow_mut().take();
+    });
+}
+
+/// No-op without the `tokio` feature — the runner calls this unconditionally.
+#[cfg(not(feature = "tokio"))]
+pub(crate) fn teardown_suite_runtime() {}
 
 use std::cell::RefCell;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
