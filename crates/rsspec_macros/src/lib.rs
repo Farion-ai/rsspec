@@ -184,9 +184,24 @@ enum Decorator {
     MustPass(Expr),
 }
 
+/// The three `it!` body forms.
+enum ItBody {
+    /// `{ … }` — implicit fixtures resolved inside via injected reads.
+    Block(Block),
+    /// `|v: &T| …` — explicit read; the runtime hands `&T` in, no injection.
+    Closure {
+        param: Ident,
+        ty: Box<Type>,
+        body: Box<Expr>,
+    },
+    /// `async { … }` — lowered to `__rt::async_test`; no injection, since a
+    /// fixture borrow can't be held across `.await`.
+    Async(Block),
+}
+
 struct ItArgs {
     name: LitStr,
-    body: Block,
+    body: ItBody,
     decorators: Vec<Decorator>,
 }
 
@@ -194,7 +209,24 @@ impl Parse for ItArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let name = input.parse()?;
         input.parse::<Token![,]>()?;
-        let body: Block = input.parse()?;
+        let body = if input.peek(Token![async]) {
+            input.parse::<Token![async]>()?;
+            ItBody::Async(input.parse()?)
+        } else if input.peek(Token![|]) {
+            input.parse::<Token![|]>()?;
+            let param: Ident = input.parse()?;
+            input.parse::<Token![:]>()?;
+            input.parse::<Token![&]>()?;
+            let ty: Type = input.parse()?;
+            input.parse::<Token![|]>()?;
+            ItBody::Closure {
+                param,
+                ty: Box::new(ty),
+                body: Box::new(input.parse()?),
+            }
+        } else {
+            ItBody::Block(input.parse()?)
+        };
         let mut decorators = Vec::new();
         while input.peek(Token![,]) {
             input.parse::<Token![,]>()?;
@@ -241,8 +273,23 @@ fn lower_it(mac: &Macro, fixtures: &[Fixture], ctor: &str) -> syn::Result<TokenS
         decorators,
     } = parse2(mac.tokens.clone())?;
     let ctor = Ident::new(ctor, Span::call_site());
-    let stmts = &body.stmts;
-    let wrapped = wrap_reads(fixtures, quote! { #(#stmts)* });
+    let test_body = match body {
+        ItBody::Block(b) => {
+            let stmts = &b.stmts;
+            let wrapped = wrap_reads(fixtures, quote! { #(#stmts)* });
+            quote! { move || { #wrapped } }
+        }
+        ItBody::Closure { param, ty, body } => {
+            // Explicit read: the runtime injects `&ty` through the closure param,
+            // so the body sees only `param` — no implicit-fixture wrapping.
+            quote! { move |#param: &#ty| { #body } }
+        }
+        ItBody::Async(b) => {
+            // No injected reads: a fixture borrow can't cross `.await`.
+            let stmts = &b.stmts;
+            quote! { ::rsspec::__rt::async_test(move || async move { #(#stmts)* }) }
+        }
+    };
     let chain: TokenStream2 = decorators
         .iter()
         .map(|d| match d {
@@ -253,7 +300,7 @@ fn lower_it(mac: &Macro, fixtures: &[Fixture], ctor: &str) -> syn::Result<TokenS
         })
         .collect();
     Ok(quote! {
-        ::rsspec::__rt::#ctor(#name, move || { #wrapped })#chain;
+        ::rsspec::__rt::#ctor(#name, #test_body)#chain;
     })
 }
 
