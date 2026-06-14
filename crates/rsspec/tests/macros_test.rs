@@ -210,8 +210,10 @@ fn retries_decorator_recovers_a_flaky_spec() {
 
 #[test]
 fn tags_decorator_lowers_to_labels() {
-    // No filter set, so the spec runs; this asserts the `tags = [...]` arm lowers
-    // to `.labels(...)` and compiles/registers without error.
+    // The `tags = [...]` arm lowers to `.labels(...)`. Label *filtering* — a filter
+    // expression including/excluding a spec — is covered end-to-end by the runner's
+    // `label_filter_config_filters_specs_at_runtime`; `run_inline` applies no filter,
+    // so this pins only that the arm registers a runnable, labelled spec.
     static RAN: AtomicU32 = AtomicU32::new(0);
     RAN.store(0, SeqCst);
 
@@ -228,6 +230,111 @@ fn tags_decorator_lowers_to_labels() {
     });
 
     assert_eq!(RAN.load(SeqCst), 1);
+}
+
+#[test]
+fn fdescribe_focuses_its_whole_container() {
+    // Focus must propagate to every spec in the focused container and exclude
+    // sibling containers — not just a single fit! spec.
+    static IN_FOCUS: AtomicU32 = AtomicU32::new(0);
+    static SIBLING: AtomicU32 = AtomicU32::new(0);
+    IN_FOCUS.store(0, SeqCst);
+    SIBLING.store(0, SeqCst);
+
+    rsspec::run_inline(|_| {
+        describe!("suite", {
+            fdescribe!("focused group", {
+                it!("runs by container focus", {
+                    IN_FOCUS.fetch_add(1, SeqCst);
+                });
+                context!("nested under focus", {
+                    it!("also runs", {
+                        IN_FOCUS.fetch_add(1, SeqCst);
+                    });
+                });
+            });
+            describe!("unfocused sibling", {
+                it!("is excluded", {
+                    SIBLING.fetch_add(1, SeqCst);
+                });
+            });
+        });
+    });
+
+    assert_eq!(IN_FOCUS.load(SeqCst), 2, "all focused specs ran");
+    assert_eq!(SIBLING.load(SeqCst), 0, "sibling excluded");
+}
+
+#[test]
+fn xdescribe_skips_its_whole_container() {
+    static RAN: AtomicU32 = AtomicU32::new(0);
+    RAN.store(0, SeqCst);
+
+    rsspec::run_inline(|_| {
+        describe!("suite", {
+            xdescribe!("pending group", {
+                it!("never runs", {
+                    RAN.fetch_add(1, SeqCst);
+                    panic!("a spec inside xdescribe! must not run");
+                });
+                context!("nested deeper", {
+                    it!("also never runs", {
+                        RAN.fetch_add(1, SeqCst);
+                        panic!("a nested spec inside xdescribe! must not run");
+                    });
+                });
+            });
+        });
+    });
+
+    assert_eq!(RAN.load(SeqCst), 0, "all specs skipped");
+}
+
+#[test]
+fn timeout_decorator_fails_a_slow_spec() {
+    // The timeout is checked after the body returns, so a body that sleeps past it
+    // must fail the spec — proving the decorator does more than register.
+    let outcome = std::panic::catch_unwind(|| {
+        rsspec::run_inline(|_| {
+            describe!("slow", {
+                it!(
+                    "exceeds its timeout",
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    },
+                    timeout = 1
+                );
+            });
+        });
+    });
+
+    assert!(outcome.is_err(), "slow body fails via timeout");
+}
+
+#[test]
+fn must_pass_repeatedly_fails_on_a_flaky_attempt() {
+    // must_pass_repeatedly must actually re-run the body and fail the spec when a
+    // later attempt fails — the branch a registration-only test never exercises.
+    static ATTEMPTS: AtomicU32 = AtomicU32::new(0);
+    ATTEMPTS.store(0, SeqCst);
+
+    let outcome = std::panic::catch_unwind(|| {
+        rsspec::run_inline(|_| {
+            describe!("unstable", {
+                it!(
+                    "passes once then fails the second run",
+                    {
+                        let n = ATTEMPTS.fetch_add(1, SeqCst);
+                        assert_eq!(n, 0, "only the first attempt passes");
+                    },
+                    must_pass_repeatedly = 3
+                );
+            });
+        });
+    });
+
+    assert!(outcome.is_err(), "a failing repeat fails the spec");
+    assert_eq!(ATTEMPTS.load(SeqCst), 2, "ran twice then stopped");
 }
 
 #[test]

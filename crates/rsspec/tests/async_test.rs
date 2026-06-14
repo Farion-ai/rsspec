@@ -4,6 +4,10 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
+// A returning describe's async_after_all runs at its scope exit, before the next
+// sibling describe — so a later spec can observe that it actually fired.
+static ASYNC_AFTER_ALL_RAN: AtomicU32 = AtomicU32::new(0);
+
 fn main() {
     rsspec::run(|ctx| {
         // =================================================================
@@ -26,20 +30,28 @@ fn main() {
         // Async hooks
         // =================================================================
         ctx.describe("Async hooks", |ctx| {
-            static HOOK_COUNTER: AtomicU32 = AtomicU32::new(0);
+            static BEFORE_EACH: AtomicU32 = AtomicU32::new(0);
+            static AFTER_EACH: AtomicU32 = AtomicU32::new(0);
 
             ctx.async_before_each(|| async {
-                HOOK_COUNTER.fetch_add(1, Ordering::SeqCst);
+                BEFORE_EACH.fetch_add(1, Ordering::SeqCst);
             });
 
             ctx.async_after_each(|| async {
-                // cleanup — verifies it doesn't panic
+                AFTER_EACH.fetch_add(1, Ordering::SeqCst);
             });
 
             ctx.it("hook ran before this test", || {
                 assert!(
-                    HOOK_COUNTER.load(Ordering::SeqCst) >= 1,
+                    BEFORE_EACH.load(Ordering::SeqCst) >= 1,
                     "async_before_each should have run"
+                );
+            });
+
+            ctx.it("the prior test's async_after_each fired", || {
+                assert!(
+                    AFTER_EACH.load(Ordering::SeqCst) >= 1,
+                    "async_after_each must run after each test, not silently skip"
                 );
             });
         });
@@ -55,7 +67,7 @@ fn main() {
             });
 
             ctx.async_after_all(|| async {
-                // cleanup
+                ASYNC_AFTER_ALL_RAN.fetch_add(1, Ordering::SeqCst);
             });
 
             ctx.it("before_all ran once", || {
@@ -64,6 +76,17 @@ fn main() {
 
             ctx.it("still only ran once", || {
                 assert_eq!(SETUP_RAN.load(Ordering::SeqCst), 1);
+            });
+        });
+
+        // The describe above has now exited, so its async_after_all has fired.
+        ctx.describe("Async after_all observed", |ctx| {
+            ctx.it("the prior scope's async_after_all ran exactly once", || {
+                assert_eq!(
+                    ASYNC_AFTER_ALL_RAN.load(Ordering::SeqCst),
+                    1,
+                    "async_after_all must fire once at scope exit, not silently skip"
+                );
             });
         });
 
