@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has terminated" — with no `block_on` in user code. A suite that runs no async
   work builds no runtime. The `tokio` feature now enables the `net`, `time`, and
   `sync` drivers so the runtime can do real IO under `enable_all`.
+- **`rsspec::fixture_cloned::<T>()`** — clone an in-scope fixture by type
+  (requires `T: Clone`). Inside an `async` hook/test body a `&T` can't be held
+  across `.await`, so clone the fixture out first and own it. The macro layer
+  injects this automatically: an `async` hook body (`before_all!(core: T =
+  async { … env … })`) that names an enclosing fixture gets an owned clone bound
+  before the `async` block, so implicit reads work in async bodies just as they
+  do in sync ones.
 
 ### Changed
 

@@ -35,7 +35,7 @@ fn main() {
             });
 
             ctx.async_it("first round-trip sees count 1", || async {
-                let tx = rsspec::__rt::with_fixture::<Counter, _>(|c| c.tx.clone());
+                let tx = rsspec::fixture_cloned::<Counter>().tx;
                 let (reply, recv) = oneshot::channel();
                 tx.send(reply)
                     .await
@@ -44,7 +44,7 @@ fn main() {
             });
 
             ctx.async_it("second round-trip sees count 2", || async {
-                let tx = rsspec::__rt::with_fixture::<Counter, _>(|c| c.tx.clone());
+                let tx = rsspec::fixture_cloned::<Counter>().tx;
                 let (reply, recv) = oneshot::channel();
                 tx.send(reply)
                     .await

@@ -265,17 +265,22 @@ fn lower_before(
             }
             let out = if let Expr::Async(async_block) = &expr {
                 // `name: T = async { … }` — drive the future on the suite runtime
-                // and store its `T` output. Implicit fixture injection is skipped:
-                // a borrowed fixture can't be held across `.await`, so read any
-                // needed fixture explicitly (and synchronously) inside the block.
+                // and store its `T` output. Enclosing fixtures named in the body
+                // are cloned out synchronously *before* the `async` block (a `&T`
+                // can't be held across `.await`), then owned across awaits.
                 let stmts = &async_block.block.stmts;
+                let body = quote! { #(#stmts)* };
+                let binds = clone_binds(&fixtures[..], &body);
                 let areg = if scope {
                     quote!(async_before_all)
                 } else {
                     quote!(async_before_each)
                 };
                 quote! {
-                    ::rsspec::__rt::#areg::<_, _, #ty>(move || async move { #(#stmts)* });
+                    ::rsspec::__rt::#areg::<_, _, #ty>(move || {
+                        #binds
+                        async move { #body }
+                    });
                 }
             } else {
                 // The expr may read earlier fixtures by bare name — inject those reads.
@@ -511,6 +516,25 @@ fn wrap_reads(fixtures: &[Fixture], inner: TokenStream2) -> TokenStream2 {
         };
     }
     acc
+}
+
+/// `let name = fixture_cloned::<T>();` bindings for each in-scope fixture the
+/// `async` body names — injected before the `async` block so the owned clone
+/// (not a borrow) is moved into the future and may live across `.await`. The
+/// referenced fixtures must be `Clone`; unmentioned ones are skipped.
+fn clone_binds(fixtures: &[Fixture], body: &TokenStream2) -> TokenStream2 {
+    let mut binds = TokenStream2::new();
+    for f in fixtures {
+        if !mentions_ident(body, &f.name) {
+            continue;
+        }
+        let name = &f.name;
+        let ty = &f.ty;
+        binds.extend(quote! {
+            let #name = ::rsspec::__rt::fixture_cloned::<#ty>();
+        });
+    }
+    binds
 }
 
 /// Whether `tokens` contains the identifier `name` anywhere, recursing into

@@ -97,6 +97,13 @@ pub mod __rt {
         crate::with_setup_value::<T, R>(f)
     }
 
+    /// Clone an in-scope fixture by type. Backs the macro layer's implicit reads
+    /// inside `async` hook bodies, where a `&T` borrow cannot be held across an
+    /// `.await`. A thin alias over [`crate::fixture_cloned`].
+    pub fn fixture_cloned<T: Clone + 'static>() -> T {
+        crate::fixture_cloned::<T>()
+    }
+
     /// Wrap an `async { … }` spec/hook body into a `Fn()`. Backs the `it!` async arm.
     #[cfg(feature = "tokio")]
     pub fn async_test<F, Fut>(f: F) -> impl Fn() + 'static
@@ -744,6 +751,19 @@ pub(crate) fn with_setup_value<T: 'static, R>(f: impl FnOnce(&T) -> R) -> R {
             std::any::type_name::<T>()
         )
     })
+}
+
+/// Clone an in-scope fixture by type.
+///
+/// The closure forms (`it(|v: &T|)`, `with_setup_value`) borrow a fixture, but a
+/// `&T` cannot be held across an `.await`. Inside an `async` hook or test body,
+/// clone the fixture out first with this and own it across awaits — the pattern
+/// the macro layer injects for implicit reads in `async` blocks. Requires
+/// `T: Clone` (pools, channel senders, and `Arc`-wrapped state are cheap to
+/// clone). Panics with the same message as [`with_setup_value`] if no `T` is in
+/// scope.
+pub fn fixture_cloned<T: Clone + 'static>() -> T {
+    with_setup_value::<T, _>(|v| v.clone())
 }
 
 /// Clear per-test values. Called by the runner between tests.
