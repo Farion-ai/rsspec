@@ -1,5 +1,5 @@
 [package]
-name = "rsspec-macros"
+name = "rsspec_macros"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

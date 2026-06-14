@@ -117,7 +117,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsspec-macros"
+name = "rsspec_macros"
 version = "0.6.0"
 dependencies = [
  "proc-macro2",
