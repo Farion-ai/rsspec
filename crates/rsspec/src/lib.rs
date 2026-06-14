@@ -78,9 +78,6 @@ pub mod __rt {
     pub fn just_before_each(hook: impl Fn() + crate::MaybeSend + 'static) {
         Context.just_before_each(hook);
     }
-    pub fn labels(labels: &[&str]) {
-        Context.labels(labels);
-    }
 
     /// Wrap an `async { … }` spec/hook body into a `Fn()`. Backs the `it!` async arm.
     #[cfg(feature = "tokio")]

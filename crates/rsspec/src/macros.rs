@@ -93,11 +93,19 @@ macro_rules! xwhen {
 /// Define a spec. Body forms:
 /// - `it!("d", { .. })` — block body
 /// - `it!("d", expr)` — asserts `expr` (with the source shown on failure)
-/// - `it!("d", |v: &T| ..)` — reads a `before_all`/`before_each` fixture
-/// - `it!("d", async { .. })` — async body (feature `tokio`)
+/// - `it!("d", |v: &T| ..)` — reads a `before_all`/`before_each` fixture (the
+///   parameter must be `&T`; an owned `|v: T|` is rejected)
+/// - `it!("d", async { .. })` — async body (feature `tokio`; the body must not
+///   itself build or `block_on` a runtime — it already runs on one)
 ///
-/// Optional trailing decorators (any order): `tags=[..], retries=N, timeout=MS,
-/// must_pass_repeatedly=N`. Alias: [`specify!`]. Focus/pending: [`fit!`], [`xit!`].
+/// Optional trailing decorators (any order): `tags=[..]` (lowers to `.labels(..)`,
+/// the same labels `RSSPEC_LABEL_FILTER` / `--label-filter` match on), `retries=N,
+/// timeout=MS, must_pass_repeatedly=N`. Alias: [`specify!`]. Focus/pending:
+/// [`fit!`], [`xit!`].
+///
+/// The body becomes a re-callable `Fn()` (so `retries` / `must_pass_repeatedly`
+/// can re-run it), so it must not move captured state. `it!(..)` expands to a
+/// statement and is not usable in expression position.
 #[macro_export]
 macro_rules! it {
     ($($t:tt)*) => { $crate::__it_impl!($crate::__rt::it, $($t)*) };
@@ -144,9 +152,11 @@ macro_rules! __it_impl {
             $ctor($name, $crate::__rt::async_test(move || async move $blk)) $(, $($dec)*)?
         )
     };
-    // fixture-reading closure body: |v: &T| expr
-    ($ctor:path, $name:expr, | $p:ident : $ty:ty | $body:expr $(, $($dec:tt)*)?) => {
-        $crate::__it_decorate!( $ctor($name, move |$p: $ty| { $body }) $(, $($dec)*)? )
+    // fixture-reading closure body: |v: &T| expr. The `&` is required — fixtures
+    // are read by reference; an owned `|v: T|` misses this arm and falls through
+    // to the bool arm (a local `bool` type error) instead of an opaque trait error.
+    ($ctor:path, $name:expr, | $p:ident : & $ty:ty | $body:expr $(, $($dec:tt)*)?) => {
+        $crate::__it_decorate!( $ctor($name, move |$p: &$ty| { $body }) $(, $($dec)*)? )
     };
     // bool-assertion sugar (greedy — MUST be the final arm)
     ($ctor:path, $name:expr, $cond:expr $(, $($dec:tt)*)?) => {
@@ -181,7 +191,9 @@ macro_rules! __it_decorate {
 // ---- hooks ----------------------------------------------------------------
 
 /// Run once before all specs in scope. Fixture form `before_all!(name: T = expr)`
-/// stores `T` for `it!(.., |name: &T| ..)`; block form runs for side effects.
+/// stores `T` for `it!(.., |v: &T| ..)`; block form runs for side effects. The
+/// fixture is keyed by **type**, not by `name` (which is documentary), so two
+/// same-type fixtures in one scope collide — last one wins.
 #[macro_export]
 macro_rules! before_all {
     ($name:ident : $ty:ty = $init:expr) => {

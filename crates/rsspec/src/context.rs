@@ -14,15 +14,25 @@ pub struct Plain(());
 #[doc(hidden)]
 pub struct WithSetup<T>(std::marker::PhantomData<T>);
 
+/// Sealing supertrait — keeps `IntoTestBody` non-implementable downstream so
+/// `into_test_fn`'s signature can evolve. Marker-generic so the two blanket
+/// impls below cannot overlap.
+mod private {
+    pub trait Sealed<Marker> {}
+}
+
 /// Trait that converts a closure into a boxed `Fn()` test body.
 /// Uses marker types so `it()` can accept both `|| { ... }` and `|val: &T| { ... }`.
 ///
 /// This trait is an implementation detail of rsspec's marker-type dispatch.
-/// It is not intended as a user extension point.
+/// It is not a user extension point — it is sealed.
 #[doc(hidden)]
-pub trait IntoTestBody<Marker> {
+pub trait IntoTestBody<Marker>: private::Sealed<Marker> {
     fn into_test_fn(self) -> crate::TestBody;
 }
+
+impl<F: Fn() + crate::MaybeSend + 'static> private::Sealed<Plain> for F {}
+impl<T: 'static, F: Fn(&T) + crate::MaybeSend + 'static> private::Sealed<WithSetup<T>> for F {}
 
 impl<F: Fn() + crate::MaybeSend + 'static> IntoTestBody<Plain> for F {
     fn into_test_fn(self) -> crate::TestBody {

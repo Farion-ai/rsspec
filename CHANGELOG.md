@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decorators `tags=[..], retries=N, timeout=MS, must_pass_repeatedly=N`. The macros
   lower to the same builder calls as the closure API and interoperate with it, so
   dropping back to closures is mechanical. No new dependency.
+- Re-exported (doc-hidden) and **sealed** `IntoTestBody`, the marker-dispatch
+  trait the `it!` macros name in their bounds — sealing keeps it
+  non-implementable downstream so its signature can evolve.
 
 ## [0.6.0] — 2026-06-03
 

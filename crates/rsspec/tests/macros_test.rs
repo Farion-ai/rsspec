@@ -178,6 +178,35 @@ fn tags_decorator_lowers_to_labels() {
     assert_eq!(RAN.load(SeqCst), 1);
 }
 
+#[test]
+fn it_arm_dispatch_is_pinned() {
+    // Pins `__it_impl!` arm order. The block body's value is `()`; if the greedy
+    // `$cond:expr` arm ever shadowed the block arm, it would expand to
+    // `assert!(())` — a compile error. So this test is the canary for a silent
+    // dispatch regression (block vs. fixture vs. bool).
+    static BLOCK_RAN: AtomicU32 = AtomicU32::new(0);
+    BLOCK_RAN.store(0, SeqCst);
+
+    rsspec::run_inline(|_| {
+        describe!("arm dispatch", {
+            before_all!(n: u32 = 7);
+            it!("block arm runs statements", {
+                let collected: Vec<u32> = (0..3).collect();
+                assert_eq!(collected.len(), 3);
+                BLOCK_RAN.fetch_add(1, SeqCst);
+            });
+            it!("fixture arm reads &T", |n: &u32| assert_eq!(*n, 7));
+            it!("cond arm asserts a bool", 1 + 1 == 2);
+        });
+    });
+
+    assert_eq!(
+        BLOCK_RAN.load(SeqCst),
+        1,
+        "the block arm executed its statements"
+    );
+}
+
 #[cfg(feature = "tokio")]
 #[test]
 fn async_it_arm_runs_on_a_runtime() {
