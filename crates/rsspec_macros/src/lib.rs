@@ -400,10 +400,12 @@ enum ItBody {
         ty: Box<Type>,
         body: Box<Expr>,
     },
-    /// `async { … }` — lowered to `__rt::async_test`; no injection, since a
-    /// fixture borrow can't be held across `.await`. Requires the consumer to
-    /// enable `rsspec`'s `tokio` feature (the only place `__rt::async_test`
-    /// exists); without it the arm fails to resolve in the generated code.
+    /// `async { … }` — lowered to `__rt::async_test`; named fixtures are cloned
+    /// in (like async `before_all!`), so they must be `Clone` and the owned
+    /// clone is moved into the future rather than a borrow held across `.await`.
+    /// Requires the consumer to enable `rsspec`'s `tokio` feature (the only place
+    /// `__rt::async_test` exists); without it the arm fails to resolve in the
+    /// generated code.
     Async(Block),
 }
 
@@ -493,9 +495,18 @@ fn lower_it(mac: &Macro, fixtures: &[Fixture], ctor: &str) -> syn::Result<TokenS
             quote! { move |#param: &#ty| { #body } }
         }
         ItBody::Async(b) => {
-            // No injected reads: a fixture borrow can't cross `.await`.
+            // Named fixtures are cloned in (like async `before_all!`): the owned
+            // clone is moved into the future, so a `&T` is never held across
+            // `.await`. The referenced fixtures must be `Clone`.
             let stmts = &b.stmts;
-            quote! { ::rsspec::__rt::async_test(move || async move { #(#stmts)* }) }
+            let body = quote! { #(#stmts)* };
+            let binds = clone_binds(fixtures, &body);
+            quote! {
+                ::rsspec::__rt::async_test(move || {
+                    #binds
+                    async move { #body }
+                })
+            }
         }
     };
     let chain: TokenStream2 = decorators

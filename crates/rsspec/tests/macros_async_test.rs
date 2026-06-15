@@ -11,6 +11,7 @@ struct Env {
 }
 
 static TORN_DOWN: AtomicU32 = AtomicU32::new(0);
+static OBSERVED: AtomicU32 = AtomicU32::new(0);
 
 fn main() {
     rsspec::run(|_| {
@@ -69,11 +70,33 @@ fn main() {
                 assert_eq!(envt.base, 5);
             });
         });
+
+        // FR: an async `it!` reads an ENCLOSING fixture by bare name across an
+        // await. The macro injects an owned clone before the future (like async
+        // before_all), so a `&Env` is never held across the `.await`.
+        describe!("async it reads outer fixture", {
+            before_all!(envit: Env = async {
+                tokio::task::yield_now().await;
+                Env { base: 42 }
+            });
+
+            it!("acts against the enclosing fixture across an await", async {
+                let r = &envit; // borrow the OWNED clone …
+                tokio::task::yield_now().await; // … and hold it across the await
+                OBSERVED.store(r.base, SeqCst);
+                assert_eq!(r.base, 42);
+            });
+        });
     });
 
     assert_eq!(
         TORN_DOWN.load(SeqCst),
         5,
         "async after_all ran once and read the enclosing fixture"
+    );
+    assert_eq!(
+        OBSERVED.load(SeqCst),
+        42,
+        "async it read the enclosing fixture as an owned clone"
     );
 }
