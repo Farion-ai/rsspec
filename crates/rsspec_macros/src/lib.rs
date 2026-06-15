@@ -326,6 +326,8 @@ enum HookArgs {
         ty: Box<Type>,
         body: Block,
     },
+    /// `async { … }` — driven on the suite runtime; in-scope fixtures cloned in.
+    Async(Block),
     /// `{ … }` — implicit fixtures resolved inside via injected reads.
     Block(Block),
 }
@@ -339,6 +341,9 @@ impl Parse for HookArgs {
                 ty: Box::new(in_ty),
                 body: input.parse()?,
             })
+        } else if input.peek(Token![async]) {
+            input.parse::<Token![async]>()?;
+            Ok(HookArgs::Async(input.parse()?))
         } else {
             Ok(HookArgs::Block(input.parse()?))
         }
@@ -346,16 +351,31 @@ impl Parse for HookArgs {
 }
 
 fn lower_hook(mac: &Macro, fixtures: &[Fixture], ctor: &str) -> syn::Result<TokenStream2> {
-    let ctor = Ident::new(ctor, Span::call_site());
+    let ctor_ident = Ident::new(ctor, Span::call_site());
     match parse2::<HookArgs>(mac.tokens.clone())? {
         HookArgs::Read { param, ty, body } => Ok(quote! {
-            ::rsspec::__rt::#ctor(move |#param: &#ty| #body);
+            ::rsspec::__rt::#ctor_ident(move |#param: &#ty| #body);
         }),
+        // `async { … }` — drive on the suite runtime. Enclosing fixtures named in
+        // the body are cloned out synchronously before the `async` block (a `&T`
+        // can't be held across `.await`), mirroring `before_all!(… = async …)`.
+        HookArgs::Async(body) => {
+            let stmts = &body.stmts;
+            let body_ts = quote! { #(#stmts)* };
+            let binds = clone_binds(fixtures, &body_ts);
+            let areg = Ident::new(&format!("async_{ctor}"), Span::call_site());
+            Ok(quote! {
+                ::rsspec::__rt::#areg(move || {
+                    #binds
+                    async move { #body_ts }
+                });
+            })
+        }
         HookArgs::Block(body) => {
             let stmts = &body.stmts;
             let wrapped = wrap_reads(fixtures, quote! { #(#stmts)* });
             Ok(quote! {
-                ::rsspec::__rt::#ctor(move || { #wrapped });
+                ::rsspec::__rt::#ctor_ident(move || { #wrapped });
             })
         }
     }

@@ -806,14 +806,21 @@ fn build_tree(body: impl FnOnce(Context)) -> Vec<TestNode> {
     })
 }
 
-/// Build and run a BDD test suite.
+/// Build and run a BDD test suite. The entry point for a `harness = false`
+/// `[[test]]` (or any binary `main`); inside a `#[test]` function use
+/// [`run_inline`] instead, which never parses args or exits the process.
 ///
-/// Works in both contexts:
+/// Behavior is selected from the CLI args the binary receives, so one target
+/// serves both runners:
 ///
-/// - **`harness = false`** — parses CLI args for filtering/listing, calls
+/// - **`cargo nextest` / libtest protocol** — invoked as `--list --format
+///   <fmt>` or `<name> --exact`, it speaks the protocol: it enumerates one trial
+///   per isolation root (the shallowest scope owning a shared
+///   `before_all`/`after_all`), runs the selected trial, and sets the process
+///   exit code (`0`/`101`).
+/// - **plain invocation** (`cargo test` on a `harness = false` target, or
+///   running the binary directly) — streams the rich BDD tree and calls
 ///   [`std::process::exit`] on failure.
-/// - **`#[test]` functions** — auto-detected via libtest-specific CLI args;
-///   skips arg parsing and panics on failure so other tests can still run.
 ///
 /// # Example
 ///
@@ -827,8 +834,36 @@ fn build_tree(body: impl FnOnce(Context)) -> Vec<TestNode> {
 pub fn run(body: impl FnOnce(Context)) {
     let nodes = build_tree(body);
 
-    // Auto-detect: are we inside cargo test's standard harness?
     let args: Vec<String> = std::env::args().collect();
+
+    // libtest/nextest protocol: when invoked as `--list --format <fmt>` or
+    // `<name> --exact`, speak the protocol (enumerate / run one isolation-root
+    // trial) and own the process exit. Plain invocation falls through to the
+    // streaming BDD tree below — the harness=false experience is unchanged.
+    let pargs = runner::parse_protocol_args(&args);
+    if let Some(action) = runner::protocol_action(&pargs) {
+        use std::io::Write as _;
+        let (output, code) = match action {
+            runner::ProtocolAction::List => (runner::list_trials(&nodes, &pargs), 0),
+            runner::ProtocolAction::Run => {
+                let outcome = runner::run_trials_protocol(&nodes, &pargs);
+                let status = if outcome.failed > 0 { "FAILED" } else { "ok" };
+                let summary = format!(
+                    "\ntest result: {status}. {} passed; {} failed; {} ignored\n",
+                    outcome.passed, outcome.failed, outcome.ignored
+                );
+                (format!("{}{}", outcome.output, summary), outcome.exit_code())
+            }
+        };
+        // process::exit does not flush stdout — write and flush explicitly so
+        // nextest (which captures via a pipe) sees the full output.
+        let mut out = std::io::stdout();
+        let _ = out.write_all(output.as_bytes());
+        let _ = out.flush();
+        std::process::exit(code);
+    }
+
+    // Auto-detect: are we inside cargo test's standard harness?
     let inside_harness = runner::detect_libtest_args(&args[1..]).is_some();
 
     let config = if inside_harness {

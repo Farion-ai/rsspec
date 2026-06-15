@@ -11,6 +11,7 @@
 //! ```
 
 use std::borrow::Cow;
+use std::fmt::Write as _;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Instant;
 
@@ -1563,6 +1564,254 @@ fn tree_has_focus(nodes: &[TestNode]) -> bool {
     })
 }
 
+// ============================================================================
+// libtest / cargo-nextest protocol
+// ============================================================================
+//
+// nextest runs one process per test and discovers tests over the libtest
+// protocol: `<bin> --list --format terse`, then `<bin> <name> --nocapture
+// --exact` per listed test. rsspec maps its runtime tree onto that protocol by
+// exposing one trial per isolation root (see `crate::trials`). Each trial runs
+// in its own process under nextest, so the per-`it` BDD tree it prints is the
+// captured output nextest shows on failure; the process exit code is the verdict.
+
+/// What a protocol invocation asks for. `None` from [`protocol_action`] means
+/// "not the protocol" — fall back to the streaming BDD tree.
+pub(crate) enum ProtocolAction {
+    /// `--list --format <fmt>` — enumerate trials.
+    List,
+    /// `<name> --exact` — run the matching trial(s).
+    Run,
+}
+
+/// The subset of libtest CLI args rsspec honors when speaking the protocol.
+/// Parsed independently of [`RunConfig`] so the streaming path is untouched.
+#[derive(Default)]
+pub(crate) struct ProtocolArgs {
+    pub list: bool,
+    pub exact: bool,
+    pub format: Option<String>,
+    pub filter: Option<String>,
+    pub include_ignored: bool,
+}
+
+/// libtest flags that take a separate value token, which must be skipped so the
+/// value (e.g. the `1` in `--test-threads 1`) is never mistaken for the test
+/// name. `--format` is handled explicitly below, so it is not listed here.
+const VALUE_FLAGS: &[&str] = &["--test-threads", "--color", "--logfile", "--skip", "--shuffle-seed"];
+
+/// Parse the protocol-relevant args out of `argv` (`argv[0]` is the program
+/// name). Unknown flags are ignored; the first bare token is the test-name
+/// filter.
+pub(crate) fn parse_protocol_args(argv: &[String]) -> ProtocolArgs {
+    let mut p = ProtocolArgs::default();
+    let mut i = 1;
+    while i < argv.len() {
+        let a = argv[i].as_str();
+        match a {
+            "--list" => p.list = true,
+            "--exact" => p.exact = true,
+            "--include-ignored" | "--ignored" => p.include_ignored = true,
+            "--nocapture" => {}
+            "--format" => {
+                if let Some(v) = argv.get(i + 1) {
+                    p.format = Some(v.clone());
+                    i += 1;
+                }
+            }
+            _ if a.starts_with("--format=") => {
+                p.format = Some(a["--format=".len()..].to_string());
+            }
+            _ if VALUE_FLAGS.contains(&a) => {
+                i += 1; // skip the value token so it is not read as the test name
+            }
+            _ if a.starts_with('-') => {} // unknown flag (e.g. `--test-threads=1`)
+            _ => {
+                if p.filter.is_none() {
+                    p.filter = Some(a.to_string());
+                }
+            }
+        }
+        i += 1;
+    }
+    p
+}
+
+/// Decide whether this invocation is a protocol call, and which kind. A bare
+/// `--list` (no `--format`) keeps rsspec's human listing; the protocol listing
+/// is only requested as `--list --format <fmt>`, exactly as nextest invokes it.
+pub(crate) fn protocol_action(p: &ProtocolArgs) -> Option<ProtocolAction> {
+    if p.list && p.format.is_some() {
+        Some(ProtocolAction::List)
+    } else if p.exact {
+        Some(ProtocolAction::Run)
+    } else {
+        None
+    }
+}
+
+/// Execute exactly the subtree at `locator`, applying the per-spec hook chain and
+/// labels inherited from its (hook-free, by construction) ancestor scopes.
+/// Returns the buffered BDD output and the subtree's result. Focus is disabled:
+/// nextest selects which trial runs, so a stray `fit` elsewhere must not suppress
+/// it.
+pub(crate) fn run_trial(
+    nodes: &[TestNode],
+    locator: &[usize],
+    config: &RunConfig,
+) -> (String, RunResult) {
+    let mut buf = String::new();
+    let mut result = RunResult::default();
+    {
+        let mut ctx = Ctx {
+            config,
+            focus_mode: false,
+            label_filter: config.resolve_label_filter(),
+            sink: Sink::Buffer(&mut buf),
+        };
+        let mut hooks = HookChain::default();
+        let mut path = Vec::new();
+        descend_to_trial(nodes, locator, 0, &mut path, &mut hooks, &mut ctx, &mut result);
+    } // ctx (and its borrow of buf) dropped here
+
+    // Drop this trial's async runtime (if any), mirroring the subtree boundary
+    // in the sequential/parallel runners.
+    crate::teardown_suite_runtime();
+
+    (buf, result)
+}
+
+/// Descend `nodes` along `locator` to the trial's node, then run its whole
+/// subtree via [`run_node`]. Each ancestor on the path is a `Describe` with no
+/// shared `before_all`/`after_all` (the isolation-root invariant), so it
+/// contributes only its per-spec hook chain and labels — pushed here so the
+/// trial's specs inherit them exactly as in a full run.
+fn descend_to_trial<'a>(
+    nodes: &'a [TestNode],
+    locator: &[usize],
+    depth: usize,
+    path: &mut Vec<String>,
+    hooks: &mut HookChain<'a>,
+    ctx: &mut Ctx,
+    result: &mut RunResult,
+) {
+    let Some((&idx, rest)) = locator.split_first() else {
+        return;
+    };
+    let Some(node) = nodes.get(idx) else {
+        return; // a malformed locator never matches a real node — no-op, not panic
+    };
+
+    if rest.is_empty() {
+        run_node(node, depth, path, hooks, false, ctx, result);
+        return;
+    }
+
+    let TestNode::Describe { name, children, .. } = node else {
+        return; // locator routed through a non-describe ancestor — impossible for
+                // an enumerate_trials locator
+    };
+
+    ctx.sink
+        .line(&format!("{}{}", "  ".repeat(depth), bold(name)));
+    path.push(name.clone());
+    let saved = hooks.push_describe(node);
+    // Symmetry with run_describe_node: ancestors push an (empty) scope layer.
+    crate::push_scope_setup_layer();
+    descend_to_trial(children, rest, depth + 1, path, hooks, ctx, result);
+    crate::pop_scope_setup_layer();
+    hooks.pop_describe(saved);
+    path.pop();
+}
+
+/// Aggregate verdict of a protocol `Run`. `passed`/`failed`/`ignored` count
+/// trials (isolation roots), not individual specs — one row per nextest test.
+/// `output` is the concatenated per-trial BDD output; the caller formats the
+/// summary line and uses [`exit_code`](Self::exit_code) for the process status.
+pub(crate) struct ProtocolOutcome {
+    pub passed: usize,
+    pub failed: usize,
+    pub ignored: usize,
+    pub output: String,
+}
+
+impl ProtocolOutcome {
+    /// libtest-style process status: `101` on any trial failure, else `0`.
+    pub fn exit_code(&self) -> i32 {
+        if self.failed > 0 {
+            101
+        } else {
+            0
+        }
+    }
+}
+
+/// Run the trials selected by `p` (exact or substring match; ignored trials are
+/// reported skipped unless `--include-ignored`). A trial fails iff its subtree
+/// records any failure.
+pub(crate) fn run_trials_protocol(nodes: &[TestNode], p: &ProtocolArgs) -> ProtocolOutcome {
+    let trials = crate::trials::enumerate_trials(nodes);
+    let cfg = RunConfig {
+        filter: None,
+        list: false,
+        include_ignored: p.include_ignored,
+        parallelism: 1,
+        label_filter: None,
+    };
+
+    let mut out = String::new();
+    let (mut passed, mut failed, mut ignored) = (0usize, 0usize, 0usize);
+
+    for t in &trials {
+        if !trial_selected(t, p) {
+            continue;
+        }
+        if t.ignored && !p.include_ignored {
+            ignored += 1;
+            let _ = writeln!(out, "test {} ... ignored", t.name);
+            continue;
+        }
+        let (buf, res) = run_trial(nodes, &t.locator, &cfg);
+        out.push_str(&buf);
+        if res.failed == 0 {
+            passed += 1;
+        } else {
+            failed += 1;
+        }
+    }
+
+    ProtocolOutcome {
+        passed,
+        failed,
+        ignored,
+        output: out,
+    }
+}
+
+/// Does trial `t` match `p`'s name filter? No filter matches everything; with
+/// `--exact` the name must equal the filter, otherwise a substring suffices.
+fn trial_selected(t: &crate::trials::Trial, p: &ProtocolArgs) -> bool {
+    match &p.filter {
+        None => true,
+        Some(f) => {
+            if p.exact {
+                &t.name == f
+            } else {
+                t.name.contains(f.as_str())
+            }
+        }
+    }
+}
+
+/// Render the trial list in the requested format (only `terse` is supported; any
+/// other value falls back to terse), filtered by `p.filter`.
+pub(crate) fn list_trials(nodes: &[TestNode], p: &ProtocolArgs) -> String {
+    let trials = crate::trials::enumerate_trials(nodes);
+    let selected: Vec<&crate::trials::Trial> =
+        trials.iter().filter(|t| trial_selected(t, p)).collect();
+    crate::trials::format_list_terse(&selected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2237,5 +2486,316 @@ mod tests {
             assert_eq!(one.pending, seq.pending);
             assert_eq!(one.skipped, seq.skipped);
         }
+    }
+}
+
+// Protocol (libtest/nextest) behavior. Expectations are derived from the
+// nextest custom-harness contract and the isolation-root spec, not from the
+// implementation: each isolation root is one trial; running one trial must run
+// only its act/specs; a trial fails iff its subtree fails; the listing is the
+// exact terse wire format nextest parses.
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+
+    fn rc() -> RunConfig {
+        RunConfig {
+            filter: None,
+            list: false,
+            include_ignored: false,
+            parallelism: 1,
+            label_filter: None,
+        }
+    }
+
+    fn argv(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn pending_it(name: &str) -> TestNode {
+        TestNode::It {
+            name: name.to_string(),
+            focused: false,
+            pending: true,
+            labels: Vec::new(),
+            retries: None,
+            timeout_ms: None,
+            must_pass_repeatedly: None,
+            test_fn: Box::new(|| {}),
+        }
+    }
+
+    // ---- run_trial: isolation ----------------------------------------------
+
+    // Running one Mode-A subtree trial runs its act exactly once and all its
+    // specs — and must NOT trigger a sibling subtree's act.
+    #[test]
+    fn run_trial_runs_only_the_targeted_subtree_act() {
+        static A_ACT: AtomicUsize = AtomicUsize::new(0);
+        static B_ACT: AtomicUsize = AtomicUsize::new(0);
+        A_ACT.store(0, SeqCst);
+        B_ACT.store(0, SeqCst);
+
+        let tree = vec![
+            TestNode::describe_with_hooks(
+                "A",
+                vec![Box::new(|| {
+                    A_ACT.fetch_add(1, SeqCst);
+                })],
+                vec![],
+                vec![TestNode::it("a1", || {}), TestNode::it("a2", || {})],
+            ),
+            TestNode::describe_with_hooks(
+                "B",
+                vec![Box::new(|| {
+                    B_ACT.fetch_add(1, SeqCst);
+                })],
+                vec![],
+                vec![TestNode::it("b1", || {})],
+            ),
+        ];
+
+        let trials = crate::trials::enumerate_trials(&tree);
+        let (_buf, res) = run_trial(&tree, &trials[0].locator, &rc());
+
+        assert_eq!(res.passed, 2, "both specs in A ran");
+        assert_eq!(res.failed, 0);
+        assert_eq!(A_ACT.load(SeqCst), 1, "A's before_all ran exactly once");
+        assert_eq!(
+            B_ACT.load(SeqCst),
+            0,
+            "B's act must not run when only A's trial is selected"
+        );
+    }
+
+    // A leaf trial runs exactly one spec, applies its ancestor before_each, and
+    // does not run sibling specs.
+    #[test]
+    fn run_trial_leaf_runs_one_spec_with_ancestor_before_each() {
+        static BEFORE_EACH: AtomicUsize = AtomicUsize::new(0);
+        static A_RAN: AtomicBool = AtomicBool::new(false);
+        static B_RAN: AtomicBool = AtomicBool::new(false);
+        BEFORE_EACH.store(0, SeqCst);
+        A_RAN.store(false, SeqCst);
+        B_RAN.store(false, SeqCst);
+
+        let tree = vec![TestNode::describe_with_each_hooks(
+            "G",
+            vec![Box::new(|| {
+                BEFORE_EACH.fetch_add(1, SeqCst);
+            })],
+            vec![],
+            vec![
+                TestNode::it("a", || {
+                    A_RAN.store(true, SeqCst);
+                }),
+                TestNode::it("b", || {
+                    B_RAN.store(true, SeqCst);
+                }),
+            ],
+        )];
+
+        let trials = crate::trials::enumerate_trials(&tree);
+        // trials[0] is the leaf "G::a" at locator [0, 0]
+        let (_buf, res) = run_trial(&tree, &trials[0].locator, &rc());
+
+        assert_eq!(res.passed, 1);
+        assert!(A_RAN.load(SeqCst), "the targeted spec ran");
+        assert!(!B_RAN.load(SeqCst), "the sibling spec must not run");
+        assert_eq!(
+            BEFORE_EACH.load(SeqCst),
+            1,
+            "the ancestor before_each ran once, for the single selected spec"
+        );
+    }
+
+    // A trial's verdict is failure iff its subtree records any failure — this is
+    // what maps to a non-zero process exit under nextest.
+    #[test]
+    fn run_trial_with_a_failing_spec_reports_failure() {
+        let tree = vec![TestNode::it("boom", || panic!("nope"))];
+        let trials = crate::trials::enumerate_trials(&tree);
+        let (_buf, res) = run_trial(&tree, &trials[0].locator, &rc());
+
+        assert_eq!(res.failed, 1);
+        assert_eq!(res.passed, 0);
+    }
+
+    // Partition property: enumerating then running every trial executes each spec
+    // exactly once (no spec dropped, none double-run), and a shared act runs once
+    // total — not once per spec.
+    #[test]
+    fn running_every_enumerated_trial_covers_each_spec_exactly_once() {
+        static ACTS: AtomicUsize = AtomicUsize::new(0);
+        ACTS.store(0, SeqCst);
+
+        let tree = vec![
+            TestNode::describe_with_hooks(
+                "Seam",
+                vec![Box::new(|| {
+                    ACTS.fetch_add(1, SeqCst);
+                })],
+                vec![],
+                vec![TestNode::it("a", || {}), TestNode::it("b", || {})],
+            ),
+            TestNode::describe_with_each_hooks(
+                "Int",
+                vec![Box::new(|| {})],
+                vec![],
+                vec![TestNode::it("s1", || {}), TestNode::it("s2", || {})],
+            ),
+            TestNode::it("top", || {}),
+        ];
+
+        let trials = crate::trials::enumerate_trials(&tree);
+        let total_passed: usize = trials
+            .iter()
+            .map(|t| run_trial(&tree, &t.locator, &rc()).1.passed)
+            .sum();
+
+        // 2 (Seam) + 2 (Int) + 1 (top) = 5 specs, each run once across the partition.
+        assert_eq!(total_passed, 5);
+        assert_eq!(
+            ACTS.load(SeqCst),
+            1,
+            "the Seam act ran once total (one trial), not once per spec"
+        );
+    }
+
+    // ---- arg parsing & action selection ------------------------------------
+
+    #[test]
+    fn list_plus_format_is_the_list_action() {
+        let p = parse_protocol_args(&argv(&["bin", "--list", "--format", "terse"]));
+        assert!(matches!(protocol_action(&p), Some(ProtocolAction::List)));
+        assert_eq!(p.format.as_deref(), Some("terse"));
+    }
+
+    #[test]
+    fn name_plus_exact_is_the_run_action() {
+        let p = parse_protocol_args(&argv(&["bin", "Seam::a", "--nocapture", "--exact"]));
+        assert!(matches!(protocol_action(&p), Some(ProtocolAction::Run)));
+        assert!(p.exact);
+        assert_eq!(p.filter.as_deref(), Some("Seam::a"));
+    }
+
+    #[test]
+    fn bare_list_is_not_the_protocol() {
+        let p = parse_protocol_args(&argv(&["bin", "--list"]));
+        assert!(
+            protocol_action(&p).is_none(),
+            "a bare --list keeps rsspec's human listing"
+        );
+    }
+
+    #[test]
+    fn plain_invocation_is_not_the_protocol() {
+        let p = parse_protocol_args(&argv(&["bin"]));
+        assert!(protocol_action(&p).is_none());
+    }
+
+    #[test]
+    fn value_flags_do_not_steal_the_test_name() {
+        let p = parse_protocol_args(&argv(&[
+            "bin",
+            "Seam::a",
+            "--exact",
+            "--test-threads",
+            "1",
+            "--color",
+            "never",
+        ]));
+        assert_eq!(
+            p.filter.as_deref(),
+            Some("Seam::a"),
+            "the '1' and 'never' values must not be mistaken for the test name"
+        );
+        assert!(p.exact);
+    }
+
+    // ---- run_trials_protocol -----------------------------------------------
+
+    #[test]
+    fn protocol_run_exact_runs_only_the_named_trial() {
+        static A_RAN: AtomicBool = AtomicBool::new(false);
+        static B_RAN: AtomicBool = AtomicBool::new(false);
+        A_RAN.store(false, SeqCst);
+        B_RAN.store(false, SeqCst);
+
+        let tree = vec![
+            TestNode::describe_with_hooks(
+                "Seam",
+                vec![Box::new(|| {})],
+                vec![],
+                vec![TestNode::it("a", || {
+                    A_RAN.store(true, SeqCst);
+                })],
+            ),
+            TestNode::describe_with_hooks(
+                "Other",
+                vec![Box::new(|| {})],
+                vec![],
+                vec![TestNode::it("b", || {
+                    B_RAN.store(true, SeqCst);
+                })],
+            ),
+        ];
+
+        let p = parse_protocol_args(&argv(&["bin", "Seam", "--exact"]));
+        let outcome = run_trials_protocol(&tree, &p);
+
+        assert_eq!(outcome.passed, 1);
+        assert_eq!(outcome.failed, 0);
+        assert_eq!(outcome.exit_code(), 0);
+        assert!(A_RAN.load(SeqCst), "the named trial ran");
+        assert!(!B_RAN.load(SeqCst), "only the named trial ran");
+    }
+
+    #[test]
+    fn protocol_run_failing_trial_exits_nonzero() {
+        let tree = vec![TestNode::it("boom", || panic!("x"))];
+        let p = parse_protocol_args(&argv(&["bin", "boom", "--exact"]));
+        let outcome = run_trials_protocol(&tree, &p);
+
+        assert_eq!(outcome.failed, 1);
+        assert_eq!(outcome.exit_code(), 101);
+    }
+
+    #[test]
+    fn protocol_run_ignored_trial_is_skipped_not_run() {
+        let tree = vec![pending_it("todo")];
+        let p = parse_protocol_args(&argv(&["bin", "todo", "--exact"]));
+        let outcome = run_trials_protocol(&tree, &p);
+
+        assert_eq!(outcome.ignored, 1);
+        assert_eq!(outcome.passed, 0);
+        assert_eq!(outcome.failed, 0);
+        assert_eq!(outcome.exit_code(), 0, "a skipped test is not a failure");
+    }
+
+    // ---- list_trials: the terse wire format run() emits --------------------
+
+    #[test]
+    fn list_trials_emits_the_terse_wire_format() {
+        let tree = vec![
+            TestNode::describe_with_hooks(
+                "Seam",
+                vec![Box::new(|| {})],
+                vec![],
+                vec![TestNode::it("a", || {})],
+            ),
+            TestNode::describe_with_each_hooks(
+                "Int",
+                vec![Box::new(|| {})],
+                vec![],
+                vec![TestNode::it("s1", || {})],
+            ),
+        ];
+        let p = parse_protocol_args(&argv(&["bin", "--list", "--format", "terse"]));
+
+        let out = list_trials(&tree, &p);
+
+        assert_eq!(out, "Seam: test\nInt::s1: test\n\n2 tests, 0 benchmarks\n");
     }
 }

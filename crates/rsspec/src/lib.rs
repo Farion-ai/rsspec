@@ -36,6 +36,7 @@ mod context;
 pub(crate) mod ordered;
 pub(crate) mod runner;
 pub(crate) mod table;
+pub(crate) mod trials;
 
 pub use context::{run, run_inline, Context, IntoBeforeHook, IntoTestBody, ItBuilder};
 
@@ -136,6 +137,36 @@ pub mod __rt {
         T: 'static,
     {
         Context.async_before_each(hook);
+    }
+
+    /// Backs `after_each!(async { … })`.
+    #[cfg(feature = "tokio")]
+    pub fn async_after_each<F, Fut>(hook: F)
+    where
+        F: Fn() -> Fut + crate::MaybeSend + 'static,
+        Fut: std::future::Future<Output = ()> + 'static,
+    {
+        Context.async_after_each(hook);
+    }
+
+    /// Backs `after_all!(async { … })`.
+    #[cfg(feature = "tokio")]
+    pub fn async_after_all<F, Fut>(hook: F)
+    where
+        F: Fn() -> Fut + crate::MaybeSend + 'static,
+        Fut: std::future::Future<Output = ()> + 'static,
+    {
+        Context.async_after_all(hook);
+    }
+
+    /// Backs `just_before_each!(async { … })`.
+    #[cfg(feature = "tokio")]
+    pub fn async_just_before_each<F, Fut>(hook: F)
+    where
+        F: Fn() -> Fut + crate::MaybeSend + 'static,
+        Fut: std::future::Future<Output = ()> + 'static,
+    {
+        Context.async_just_before_each(hook);
     }
 }
 

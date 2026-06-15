@@ -505,6 +505,42 @@ API is unchanged and `!Send` bodies (capturing `Rc`/`RefCell`) still compile.
 - The buffered tree output is deterministic; **stderr** (ordered-step echoes, retry notices) still interleaves.
 - Without the `parallel` feature, `--parallel`/`RSSPEC_PARALLEL` are accepted but warn and run sequentially.
 
+## Running under `cargo test` and `cargo nextest`
+
+rsspec runs under both the standard test runner and [`cargo nextest`](https://nexte.st).
+The interesting question with nextest is *granularity*, and rsspec answers it from your
+fixtures rather than asking you to choose.
+
+**We isolate acts, not assertions.** nextest's model is one process per test. For
+"arrange & act once, assert often", isolating per *assertion* would be wrong — it would
+re-run the expensive act for every assertion. So the unit of process-isolation is the
+scope that owns the shared setup, not the individual `it`.
+
+Concretely, the isolation unit is the **shallowest scope on the path to a spec that
+declares a `before_all`/`after_all`** (`before_each`/`after_each` are per-spec and don't
+force co-location). That subtree runs as one nextest test:
+
+- **Seam / e2e** — a `before_all` at the top (seeded DB, warm cache, HTTP app shared across
+  scenarios) → the suite is **one** nextest test. You get cross-binary isolation, suite-level
+  retries (a flaky act re-runs act + asserts together — the correct unit), and reporting,
+  while the act still runs exactly once.
+- **Integration** — `before_each` per scenario, no shared `before_all` → each spec is
+  **independent**, so each becomes its own nextest test with full per-test isolation,
+  `--partition` sharding, and retries.
+- **Unit** — table-driven / pure specs → each case is its own nextest test.
+
+You never pick the boundary; where you declare shared state decides it. Independent specs
+get per-test isolation for free; specs that share an act stay together because they must.
+
+In nextest, each isolation root is one row in the summary/JUnit; the per-`it` breakdown is in
+the captured output (rsspec's tree), shown on failure or with `--nocapture`. For the rich,
+streaming BDD tree during local development, run the target as `harness = false` and use
+`cargo test` — the output is identical to running the binary directly.
+
+> Sharing a connection pool in a `before_all` is the one case where infra is *inevitably*
+> shared state: those specs pin to one process by design (re-creating the pool per process is
+> the alternative — correct, just slower). That's a knob you control by where you put the pool.
+
 ## Runtime Helpers
 
 ### defer_cleanup

@@ -3,11 +3,14 @@
 //! it implicitly by name — no `block_on`, no `|v: &T|` ceremony.
 
 use rsspec::describe;
+use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
 
 #[derive(Clone)]
 struct Env {
     base: u32,
 }
+
+static TORN_DOWN: AtomicU32 = AtomicU32::new(0);
 
 fn main() {
     rsspec::run(|_| {
@@ -48,5 +51,29 @@ fn main() {
                 });
             });
         });
+
+        // async teardown reading an enclosing fixture by bare name.
+        describe!("async teardown", {
+            before_all!(envt: Env = async {
+                tokio::task::yield_now().await;
+                Env { base: 5 }
+            });
+
+            after_all!(async {
+                let r = &envt;
+                tokio::task::yield_now().await;
+                TORN_DOWN.fetch_add(r.base, SeqCst);
+            });
+
+            it!("runs the spec", {
+                assert_eq!(envt.base, 5);
+            });
+        });
     });
+
+    assert_eq!(
+        TORN_DOWN.load(SeqCst),
+        5,
+        "async after_all ran once and read the enclosing fixture"
+    );
 }
