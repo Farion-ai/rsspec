@@ -80,12 +80,15 @@ fn main() {
                 Env { base: 42 }
             });
 
-            it!("acts against the enclosing fixture across an await", async {
-                let r = &envit; // borrow the OWNED clone …
-                tokio::task::yield_now().await; // … and hold it across the await
-                OBSERVED.store(r.base, SeqCst);
-                assert_eq!(r.base, 42);
-            });
+            it!(
+                "acts against the enclosing fixture across an await",
+                async {
+                    let r = &envit; // borrow the OWNED clone …
+                    tokio::task::yield_now().await; // … and hold it across the await
+                    OBSERVED.store(r.base, SeqCst);
+                    assert_eq!(r.base, 42);
+                }
+            );
         });
     });
 

@@ -148,7 +148,14 @@ mod tests {
         }
     }
 
-    fn describe(name: &str, pending: bool, before_all: bool, after_all: bool, before_each: bool, children: Vec<TestNode>) -> TestNode {
+    fn describe(
+        name: &str,
+        pending: bool,
+        before_all: bool,
+        after_all: bool,
+        before_each: bool,
+        children: Vec<TestNode>,
+    ) -> TestNode {
         let hook = || -> Vec<crate::TestBody> { vec![Box::new(|| {})] };
         TestNode::Describe {
             name: name.to_string(),
@@ -225,7 +232,11 @@ mod tests {
         )];
         let trials = enumerate_trials(&tree);
 
-        assert_eq!(trials.len(), 1, "outer is the isolation root; inner does not split");
+        assert_eq!(
+            trials.len(),
+            1,
+            "outer is the isolation root; inner does not split"
+        );
         assert_eq!(trials[0].name, "outer");
     }
 
@@ -237,7 +248,11 @@ mod tests {
     fn mode_b_independent_specs_each_become_a_leaf_trial() {
         let tree = vec![d_be(
             "Integration",
-            vec![it_("scenario one"), it_("scenario two"), it_("scenario three")],
+            vec![
+                it_("scenario one"),
+                it_("scenario two"),
+                it_("scenario three"),
+            ],
         )];
         let trials = enumerate_trials(&tree);
 
@@ -258,7 +273,10 @@ mod tests {
         let tree = vec![d("arithmetic", vec![it_("addition"), it_("subtraction")])];
         let trials = enumerate_trials(&tree);
 
-        assert_eq!(names(&trials), vec!["arithmetic::addition", "arithmetic::subtraction"]);
+        assert_eq!(
+            names(&trials),
+            vec!["arithmetic::addition", "arithmetic::subtraction"]
+        );
     }
 
     // A bare top-level `it` (no enclosing describe, no shared act) is its own
@@ -303,7 +321,10 @@ mod tests {
         ];
         let trials = enumerate_trials(&tree);
 
-        assert_eq!(names(&trials), vec!["Seam", "Integration::s1", "Integration::s2"]);
+        assert_eq!(
+            names(&trials),
+            vec!["Seam", "Integration::s1", "Integration::s2"]
+        );
     }
 
     // ---- Pending → ignored --------------------------------------------------
@@ -319,7 +340,10 @@ mod tests {
         ];
         let trials = enumerate_trials(&tree);
 
-        assert_eq!(names(&trials), vec!["todo", "g::later", "whole group::inside"]);
+        assert_eq!(
+            names(&trials),
+            vec!["todo", "g::later", "whole group::inside"]
+        );
         assert!(
             trials.iter().all(|t| t.ignored),
             "every pending spec must be flagged ignored"

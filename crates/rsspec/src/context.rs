@@ -852,7 +852,10 @@ pub fn run(body: impl FnOnce(Context)) {
                     "\ntest result: {status}. {} passed; {} failed; {} ignored\n",
                     outcome.passed, outcome.failed, outcome.ignored
                 );
-                (format!("{}{}", outcome.output, summary), outcome.exit_code())
+                (
+                    format!("{}{}", outcome.output, summary),
+                    outcome.exit_code(),
+                )
             }
         };
         // process::exit does not flush stdout — write and flush explicitly so

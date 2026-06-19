@@ -758,9 +758,9 @@ pub(crate) fn with_setup_value<T: 'static, R>(f: impl FnOnce(&T) -> R) -> R {
     let f = match SETUP_STORE.with(|cell| {
         let store = cell.borrow();
         match store.get(&tid) {
-            Some(boxed) => Ok(f(boxed
-                .downcast_ref::<T>()
-                .expect("rsspec: TypeId/value type mismatch — internal invariant violated"))),
+            Some(boxed) => Ok(f(boxed.downcast_ref::<T>().expect(
+                "rsspec: TypeId/value type mismatch — internal invariant violated",
+            ))),
             None => Err(f),
         }
     }) {
@@ -772,9 +772,9 @@ pub(crate) fn with_setup_value<T: 'static, R>(f: impl FnOnce(&T) -> R) -> R {
         let stack = cell.borrow();
         for layer in stack.iter().rev() {
             if let Some(boxed) = layer.get(&tid) {
-                return f(boxed.downcast_ref::<T>().expect(
-                    "rsspec: TypeId/value type mismatch — internal invariant violated",
-                ));
+                return f(boxed
+                    .downcast_ref::<T>()
+                    .expect("rsspec: TypeId/value type mismatch — internal invariant violated"));
             }
         }
         panic!(

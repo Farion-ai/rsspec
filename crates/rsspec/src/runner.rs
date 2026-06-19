@@ -1598,7 +1598,13 @@ pub(crate) struct ProtocolArgs {
 /// libtest flags that take a separate value token, which must be skipped so the
 /// value (e.g. the `1` in `--test-threads 1`) is never mistaken for the test
 /// name. `--format` is handled explicitly below, so it is not listed here.
-const VALUE_FLAGS: &[&str] = &["--test-threads", "--color", "--logfile", "--skip", "--shuffle-seed"];
+const VALUE_FLAGS: &[&str] = &[
+    "--test-threads",
+    "--color",
+    "--logfile",
+    "--skip",
+    "--shuffle-seed",
+];
 
 /// Parse the protocol-relevant args out of `argv` (`argv[0]` is the program
 /// name). Unknown flags are ignored; the first bare token is the test-name
@@ -1671,7 +1677,15 @@ pub(crate) fn run_trial(
         };
         let mut hooks = HookChain::default();
         let mut path = Vec::new();
-        descend_to_trial(nodes, locator, 0, &mut path, &mut hooks, &mut ctx, &mut result);
+        descend_to_trial(
+            nodes,
+            locator,
+            0,
+            &mut path,
+            &mut hooks,
+            &mut ctx,
+            &mut result,
+        );
     } // ctx (and its borrow of buf) dropped here
 
     // Drop this trial's async runtime (if any), mirroring the subtree boundary

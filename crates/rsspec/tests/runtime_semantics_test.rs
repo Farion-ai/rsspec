@@ -56,7 +56,13 @@ fn hooks_fire_in_documented_order_across_nested_scopes() {
     assert_eq!(
         seq,
         vec![
-            "be:outer", "be:inner", "jbe:outer", "jbe:inner", "body", "ae:inner", "ae:outer",
+            "be:outer",
+            "be:inner",
+            "jbe:outer",
+            "jbe:inner",
+            "body",
+            "ae:inner",
+            "ae:outer",
         ],
         "hook order must be: before_each outer→inner, just_before_each outer→inner, \
          body, after_each inner→outer"
@@ -127,7 +133,10 @@ fn retries_exhausted_fails_the_spec() {
         });
     }));
 
-    assert!(outcome.is_err(), "a spec failing every attempt must fail the suite");
+    assert!(
+        outcome.is_err(),
+        "a spec failing every attempt must fail the suite"
+    );
     assert_eq!(
         ATTEMPTS.load(SeqCst),
         3,
@@ -166,7 +175,10 @@ fn must_pass_repeatedly_fails_on_a_flaky_attempt() {
         rsspec::run_inline(|ctx| {
             ctx.it("flaky", || {
                 let n = ATTEMPTS.fetch_add(1, SeqCst);
-                assert_eq!(n, 0, "passes the first time, fails the second required pass");
+                assert_eq!(
+                    n, 0,
+                    "passes the first time, fails the second required pass"
+                );
             })
             .must_pass_repeatedly(3);
         });
@@ -244,7 +256,10 @@ fn fdescribe_focuses_its_subtree_and_skips_sibling_describes() {
         }
     });
 
-    assert!(inside_ran.load(SeqCst), "specs inside the focused describe must run");
+    assert!(
+        inside_ran.load(SeqCst),
+        "specs inside the focused describe must run"
+    );
     assert!(
         !outside_ran.load(SeqCst),
         "specs in sibling describes must be skipped"
@@ -272,7 +287,11 @@ fn defer_cleanup_runs_in_lifo_order() {
     });
 
     let seq = order.lock().expect("order mutex poisoned").clone();
-    assert_eq!(seq, vec![3, 2, 1], "deferred cleanups must run last-registered-first");
+    assert_eq!(
+        seq,
+        vec![3, 2, 1],
+        "deferred cleanups must run last-registered-first"
+    );
 }
 
 // ---- skip! macro ------------------------------------------------------------
@@ -303,7 +322,10 @@ fn skip_macro_returns_early_without_failing() {
         });
     });
 
-    assert!(reached_before.load(SeqCst), "the spec body runs up to skip!");
+    assert!(
+        reached_before.load(SeqCst),
+        "the spec body runs up to skip!"
+    );
     assert!(
         !reached_after.load(SeqCst),
         "skip! must return early — code after it must not run"
