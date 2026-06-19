@@ -70,6 +70,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unaffected. A `&T` fixture still can't be held across `.await` — name the
   fixture in an `async` body and the macro clones it in, or call
   `rsspec::fixture_cloned::<T>()` directly.
+- MSRV raised to **1.85**, required by the `trybuild`-based test suite's
+  toolchain (its `toml` dependency moved to the 2024 edition). The library
+  itself uses no 2024-edition features.
 
 ## [0.6.0] — 2026-06-03
 
