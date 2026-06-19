@@ -5,38 +5,7 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Added
-
-- **Async value-returning lifecycle hooks on a suite-scoped runtime.**
-  `async_before_all` and `async_before_each` now resolve to a value `T` (was
-  `()` only), stored exactly like their sync counterparts — so an async
-  `before_all` can build a fixture (`before_all!(pool: Pool = async { … })`) and
-  later sync `it!` bodies read it implicitly. rsspec drives every async hook and
-  test in a subtree on **one** lazily-built `current_thread` Tokio runtime that
-  lives for the whole subtree (per worker thread under `parallel`) instead of a
-  throwaway runtime per call. A connection pool or IO handle created in an async
-  hook therefore stays usable across later hooks and tests — no more "IO driver
-  has terminated" — with no `block_on` in user code. A suite that runs no async
-  work builds no runtime. The `tokio` feature now enables the `net`, `time`, and
-  `sync` drivers so the runtime can do real IO under `enable_all`.
-- **`rsspec::fixture_cloned::<T>()`** — clone an in-scope fixture by type
-  (requires `T: Clone`). Inside an `async` hook/test body a `&T` can't be held
-  across `.await`, so clone the fixture out first and own it. The macro layer
-  injects this automatically: an `async` hook body (`before_all!(core: T =
-  async { … env … })`) that names an enclosing fixture gets an owned clone bound
-  before the `async` block, so implicit reads work in async bodies just as they
-  do in sync ones.
-
-### Changed
-
-- `async_before_all` / `async_before_each` gain a fixture type parameter
-  (inferred from the future's output); existing `Output = ()` hooks are
-  unaffected. A `&T` fixture still cannot be held across `.await` — read fixtures
-  with the closure accessor inside async bodies.
-
-## [0.7.0] — 2026-06-14
+## [0.7.0] — 2026-06-19
 
 ### Added
 
@@ -48,8 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inner `before_all` derives per-context results from one expensive outer fixture,
   and `after_all` can use the fixture for teardown. Works in both the closure API
   and the macro layer (`before_all!(|env: &T| -> U { .. })`, `after_all!(|env: &T|
-  { .. })`). One fixture per hook; async hooks cannot read fixtures (the borrow
-  can't be held across `.await`). The no-parameter forms are unchanged.
+  { .. })`). One fixture per hook. The no-parameter forms are unchanged. (Async
+  hooks and `it!` bodies read fixtures too — by name, cloned in; see below.)
 - Re-exported (doc-hidden) and **sealed** `IntoBeforeHook`, the marker-dispatch
   trait backing the `before_*` hooks' read/return forms.
 
@@ -71,6 +40,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Re-exported (doc-hidden) and **sealed** `IntoTestBody`, the marker-dispatch
   trait the `it!` macros name in their bounds — sealing keeps it
   non-implementable downstream so its signature can evolve.
+
+- **Async value-returning lifecycle hooks on a suite-scoped runtime.**
+  `async_before_all` and `async_before_each` now resolve to a value `T` (was
+  `()` only), stored exactly like their sync counterparts — so an async
+  `before_all` can build a fixture (`before_all!(pool: Pool = async { … })`) and
+  later sync `it!` bodies read it implicitly. rsspec drives every async hook and
+  test in a subtree on **one** lazily-built `current_thread` Tokio runtime that
+  lives for the whole subtree (per worker thread under `parallel`) instead of a
+  throwaway runtime per call. A connection pool or IO handle created in an async
+  hook therefore stays usable across later hooks and tests — no more "IO driver
+  has terminated" — with no `block_on` in user code. A suite that runs no async
+  work builds no runtime. The `tokio` feature now enables the `net`, `time`, and
+  `sync` drivers so the runtime can do real IO under `enable_all`.
+- **`rsspec::fixture_cloned::<T>()` and implicit fixture reads in `async`
+  bodies.** Clone an in-scope fixture by type (requires `T: Clone`); inside an
+  `async` hook or `it!` body a `&T` can't be held across `.await`, so the fixture
+  is cloned out first and owned. The macro layer injects this automatically: an
+  `async` hook body (`before_all!(core: T = async { … env … })`) **or an `async`
+  `it!` body** (`it!("…", async { … env … })`) that names an enclosing fixture
+  gets an owned clone bound before the `async` block — so an async spec can
+  `.await` against the fixture and assert inline (no pre-computed transfer
+  struct), and implicit reads work in async bodies just as they do in sync ones.
+
+### Changed
+
+- `async_before_all` / `async_before_each` gain a fixture type parameter
+  (inferred from the future's output); existing `Output = ()` hooks are
+  unaffected. A `&T` fixture still can't be held across `.await` — name the
+  fixture in an `async` body and the macro clones it in, or call
+  `rsspec::fixture_cloned::<T>()` directly.
 
 ## [0.6.0] — 2026-06-03
 

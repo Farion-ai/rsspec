@@ -191,7 +191,7 @@ ctx.describe("PURL lookup", |ctx| {
 });
 ```
 
-One fixture per hook. Async hooks cannot read a fixture (the borrow can't be held across `.await`).
+One fixture per hook. An async hook can't take a `&T` param — a borrow can't cross `.await` — so inside an async body clone the fixture out with `rsspec::fixture_cloned::<T>()` (or, with the macro layer, just name it and it is cloned in). See [Async Tests](#async-tests).
 
 ### Decorators
 
@@ -334,7 +334,8 @@ fn main() {
 **Specs** — `it!` / `specify!`, focused `fit!` / `fspecify!`, pending `xit!` /
 `xspecify!`. Body forms: a `{ block }` (in-scope fixtures read implicitly by name), an
 explicit `|v: &T|` read (the runtime hands the reference in), or `async { … }` (requires
-the `tokio` feature — one `it!` replaces the `async_*` methods). Trailing decorators in any
+the `tokio` feature — in-scope fixtures are read here too, cloned in so they survive
+`.await`; one `it!` replaces the `async_*` methods). Trailing decorators in any
 order: `tags=[..]`, `retries=N`, `timeout=MS`, `must_pass_repeatedly=N`.
 
 **Containers** — `describe!` / `context!` / `when!`, focused `fdescribe!` / `fcontext!` /
@@ -397,9 +398,9 @@ ctx.describe("with async setup", |ctx| {
     });
 
     ctx.async_it("uses the pool", || async {
-        // Clone the pool out of the fixture synchronously, then await on it —
+        // Clone the pool out of the fixture, then await on it —
         // a `&T` cannot be held across `.await`, but `PgPool` is `Clone`.
-        let pool = rsspec::__rt::with_fixture::<PgPool, _>(|p| p.clone());
+        let pool = rsspec::fixture_cloned::<PgPool>();
         let rows = sqlx::query("SELECT 1").fetch_all(&pool).await.unwrap();
         assert_eq!(rows.len(), 1);
     });
@@ -414,7 +415,8 @@ describe!("with async setup", {
         PgPool::connect("postgres://localhost/test").await.unwrap()
     });
     it!("uses the pool", async {
-        let rows = sqlx::query("SELECT 1").fetch_all(&pool.clone()).await.unwrap();
+        // `pool` is the enclosing fixture, cloned in — own it across `.await`.
+        let rows = sqlx::query("SELECT 1").fetch_all(&pool).await.unwrap();
         assert_eq!(rows.len(), 1);
     });
 });
@@ -461,7 +463,7 @@ ctx.it("manual async", rsspec::async_test(|| async {
 **Async runtime details:**
 
 - All async hooks and tests in a subtree share **one** lazily-built single-threaded Tokio runtime (`new_current_thread().enable_all()`), created on first async use and dropped when the subtree finishes (one per worker thread under `parallel`). A resource bound to the runtime — a pool, a listener, a spawned task — therefore survives from one hook to the next. A subtree with no async work builds no runtime.
-- Because it is `current_thread` and runs on the runner thread, fixture reads (`with_fixture`) are valid inside async bodies. A `&T` fixture cannot be held across `.await`; clone out what you need first (pools and channel senders are `Clone`).
+- Because it is `current_thread` and runs on the runner thread, fixture reads are valid inside async bodies. A `&T` fixture cannot be held across `.await`; clone out what you need first with `rsspec::fixture_cloned::<T>()` (pools and channel senders are `Clone`) — or, with the macro layer, just name the fixture and it is cloned in.
 - `tokio::spawn()` works but runs on the same thread — there is no multi-threaded parallelism within a single test.
 - **Do not create a nested Tokio runtime** inside an async test. Calling `Runtime::new()` (or `block_on`) inside an `async_it` block will panic with "Cannot start a runtime from within a runtime."
 - The `|| async { ... }` pattern (closure returning a future) is required because Rust's `async Fn()` trait is not yet stable.
