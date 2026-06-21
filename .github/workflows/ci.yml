@@ -60,6 +60,11 @@ jobs:
 
       - name: Dependency licenses and bans
         uses: EmbarkStudios/cargo-deny-action@34899fc7ba81ca6268d5947a7a16b4649013fea1 # v2.0.11
+        with:
+          # Advisories are covered by the Security audit step above. Skip them
+          # here: this pinned action's bundled cargo-deny is too old to parse
+          # CVSS 4.0 advisories now in the RustSec DB (e.g. RUSTSEC-2026-0124).
+          command: check bans licenses sources
 
   msrv:
     name: MSRV (1.85)
