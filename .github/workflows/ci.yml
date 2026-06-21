@@ -12,7 +12,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RSSPEC_FAIL_ON_FOCUS: "1"
+  # NOTE: RSSPEC_FAIL_ON_FOCUS is intentionally NOT set here. rsspec's own
+  # test suite exercises focus (fit/fdescribe) through the public API, so the
+  # global guard would abort its own focus tests. The feature remains available
+  # to downstream consumers; we just can't enable it in the process that tests it.
 
 jobs:
   check:
